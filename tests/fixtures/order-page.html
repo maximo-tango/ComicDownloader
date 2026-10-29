@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"><title>순서 테스트</title>
+<style>.bg { width: 300px; height: 100px; background: url('/order/bg-mid.png') center / cover; } img { width: 200px; }</style></head>
+<body>
+  <!-- DOM order: zebra(A), css bg, apple(B), mango(C). Alphabetical: apple, bg, mango, zebra. Largest: mango. -->
+  <img id="A" src="/order/zebra-400.png" srcset="/order/zebra-400.png 400w, /order/zebra-1200.png 1200w" sizes="200px" alt="A">
+  <div class="bg"></div>
+  <img id="B" src="/order/apple.png" alt="B">
+  <div id="slot"></div>
+  <img id="C" src="/order/mango.png" alt="C">
+</body>
+</html>

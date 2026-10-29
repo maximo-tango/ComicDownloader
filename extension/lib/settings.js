@@ -1,11 +1,13 @@
 export const DEFAULT_SETTINGS = {
-  rootFolder: 'Image Hunter',
-  perSiteFolder: true,
+  rootFolder: 'ImageHunter',
+  folderMode: 'page', // 'page' (page title) | 'site' | 'none'
   conflictAction: 'uniquify', // never overwrite by default
   concurrency: 3,
   thumbMaxSide: 300,
-  setReferer: true,
-  autoSkipFailed: false,
+  guessVariants: false, // URL-pattern guesses are opt-in
+  previewSize: 'medium', // 'small' | 'medium' | 'large'
+  scrollMaxScreens: 30, // auto-scroll never runs unbounded
+  pdfPageSize: 'image', // 'image' (page = image size) | 'a4'
 };
 
 export async function loadSettings() {

@@ -90,21 +90,6 @@ export function formatFromMime(mime) {
   return map[m] || null;
 }
 
-/** All digit runs in the URL path+query, used only as an auxiliary sort key. */
-export function urlNumbers(url) {
-  try {
-    const u = new URL(url);
-    return ((u.pathname + u.search).match(/\d+/g) || []).map(Number);
-  } catch {
-    return [];
-  }
-}
-
-const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-export function naturalCompare(a, b) {
-  return collator.compare(a || '', b || '');
-}
-
 /**
  * Classifies a raw URL string from a page. Never throws: bad input becomes
  * { kind: 'invalid' } so one broken attribute can't stop a whole scan.

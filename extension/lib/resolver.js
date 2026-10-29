@@ -145,7 +145,8 @@ export function chooseOriginal(entry, probed, opts = DEFAULT_RESOLVE_OPTIONS) {
     (!(width > 0) && entry.rendered?.w > 0 && Math.max(entry.rendered.w, entry.rendered.h) < opts.thumbMaxSide);
 
   let originalState;
-  if (!(width > 0)) originalState = 'unknown';
+  // Size known only from the page, but the extension cannot reach the URL: not verified.
+  if (!(width > 0) || !chosen.probe?.ok) originalState = 'unknown';
   else if (score < 0.5 || isThumbnail || rejectedLarger) originalState = 'compare';
   else if (originalStatus === 'found') originalState = 'hires';
   else originalState = 'confirmed';
@@ -160,6 +161,7 @@ export function chooseOriginal(entry, probed, opts = DEFAULT_RESOLVE_OPTIONS) {
     format: p.format || formatFromUrl(chosen.url) || null,
     // true when the format came from the file's bytes or MIME type, not the URL
     formatVerified: !!p.formatVerified,
+    serverName: p.serverName || '',
     bytes: p.bytes ?? null,
     mime: p.mime || null,
     isThumbnail,
@@ -179,6 +181,8 @@ export function chooseOriginal(entry, probed, opts = DEFAULT_RESOLVE_OPTIONS) {
       height: c.probe?.height || 0,
       format: c.probe?.format || null,
       formatVerified: !!c.probe?.formatVerified,
+      mime: c.probe?.mime || null,
+      serverName: c.probe?.serverName || '',
       bytes: c.probe?.bytes ?? null,
       error: c.probe?.error || null,
       chosen: c === chosen,
@@ -213,6 +217,8 @@ export function selectCandidate(item, url) {
     format: c.format || formatFromUrl(c.url),
     bytes: c.bytes ?? null,
     formatVerified: !!c.formatVerified,
+    mime: c.mime || null,
+    serverName: c.serverName || '',
     userChosen: true,
     candidates: item.candidates.map((x) => ({ ...x, chosen: x.url === url })),
   };

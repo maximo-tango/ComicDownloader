@@ -1,18 +1,20 @@
 {
   "manifest_version": 3,
   "name": "Image Hunter",
-  "version": "1.0.0",
-  "description": "웹페이지에서 썸네일이 아닌 원본 이미지를 찾아 순차 탐색하고 일괄 다운로드합니다.",
+  "version": "1.1.0",
+  "description": "웹페이지의 이미지를 페이지 순서대로 추출하고, 원본 후보를 확인해 일괄 다운로드하거나 PDF로 저장합니다.",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "scripting", "downloads", "storage", "tabs", "declarativeNetRequestWithHostAccess"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": ["activeTab", "scripting", "downloads", "storage"],
+  "optional_host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {
-    "default_title": "Image Hunter — 이 페이지의 원본 이미지 찾기",
+    "default_title": "Image Hunter",
+    "default_popup": "popup/popup.html",
     "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
   },
+  "options_page": "options/options.html",
   "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "commands": {
-    "_execute_action": { "suggested_key": { "default": "Alt+Shift+I" }, "description": "현재 페이지 분석" }
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+I" }, "description": "Image Hunter 메뉴 열기" }
   }
 }

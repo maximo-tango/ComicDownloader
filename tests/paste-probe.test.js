@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseUrlList } from '../extension/lib/paste.js';
-import { createProber, readHead } from '../extension/lib/probe.js';
+import { createProber, fetchWithFallback, readHead } from '../extension/lib/probe.js';
 import { fakeFetch, jpegHeader, pngHeader } from './helpers.js';
 
 test('URL list: validation, duplicates, custom names, comments', () => {
@@ -59,5 +59,17 @@ test('prober memoises and falls back to decoding when fetch fails', async () => 
   assert.equal(a, b);
   assert.deepEqual([a.ok, a.width, a.bytes, a.viaDecode], [true, 640, null, true]);
   assert.equal(decodes, 1);
-  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls.map((c) => c.init.credentials), ['include', 'omit'], 'retried once without cookies, then decoded');
+});
+
+test('wildcard-CORS servers: retried without credentials', async () => {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push(init.credentials);
+    if (init.credentials === 'include') throw new TypeError('Failed to fetch');
+    return new Response('ok');
+  };
+  const r = await fetchWithFallback(impl, 'https://cdn.test/x.jpg', {});
+  assert.equal(await r.text(), 'ok');
+  assert.deepEqual(calls, ['include', 'omit']);
 });

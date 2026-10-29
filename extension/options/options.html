@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Image Hunter 설정</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <link rel="stylesheet" href="../app/app.css">
+</head>
+<body>
+  <header class="topbar"><div class="brand"><img src="../icons/icon32.png" alt=""> Image Hunter 설정</div></header>
+  <main>
+    <form id="form" class="panel settings">
+      <h2>저장 위치</h2>
+      <p class="hint">모든 파일은 Chrome 다운로드 폴더 아래에 저장됩니다. 실제 위치는 Chrome 설정(설정 → 다운로드)에 따라 다릅니다.</p>
+      <label class="field"><span>기본 폴더</span><input name="rootFolder" type="text" maxlength="60"></label>
+      <label class="field"><span>하위 폴더</span>
+        <select name="folderMode">
+          <option value="page">페이지 제목별 (예: ImageHunter/페이지 제목/)</option>
+          <option value="site">사이트별 (예: ImageHunter/example.com/)</option>
+          <option value="none">하위 폴더 없음</option>
+        </select></label>
+      <label class="field"><span>같은 이름의 파일이 이미 있을 때</span>
+        <select name="conflictAction">
+          <option value="uniquify">덮어쓰지 않고 "이름 (1).jpg"로 저장 (권장)</option>
+          <option value="overwrite">기존 파일 덮어쓰기</option>
+        </select></label>
+
+      <h2>다운로드</h2>
+      <label class="field"><span>동시 다운로드 수 (1~8)</span><input name="concurrency" type="number" min="1" max="8"></label>
+      <label class="field"><span>PDF 페이지 크기</span>
+        <select name="pdfPageSize">
+          <option value="image">이미지 크기 그대로</option>
+          <option value="a4">A4에 맞춤</option>
+        </select></label>
+
+      <h2>이미지 목록</h2>
+      <label class="field"><span>기본 미리보기 크기</span>
+        <select name="previewSize"><option value="small">작게</option><option value="medium">중간</option><option value="large">크게</option></select></label>
+      <label class="field"><span>썸네일로 간주할 최대 변 길이 (px)</span><input name="thumbMaxSide" type="number" min="16" max="4000" step="10"></label>
+      <label class="field"><span>자동 스크롤 한 번에 최대 화면 수</span><input name="scrollMaxScreens" type="number" min="1" max="200"></label>
+      <label class="check"><input name="guessVariants" type="checkbox"> URL 패턴으로 고해상도 주소 추측 (실험적, 기본 꺼짐)</label>
+      <p class="hint">켜면 <code>-300x200</code>, <code>_thumb</code>, <code>?w=300</code> 같은 주소 규칙을 되돌린 주소도 후보로 검사합니다. 실제로 존재하고 모양이 같을 때만 후보로 씁니다.</p>
+      <div id="saved" class="status-line"></div>
+    </form>
+
+    <section class="panel settings">
+      <h2>사이트 접근 권한 (선택)</h2>
+      <p class="hint">기본적으로 Image Hunter는 메뉴를 연 탭에만 일시적으로 접근합니다(activeTab). 아래 권한을 허용하면 다음이 가능해집니다.</p>
+      <ul class="hint">
+        <li>다른 사이트(CDN)에 있는 이미지의 실제 파일 크기·형식 확인</li>
+        <li>다른 사이트 이미지를 PDF에 넣기</li>
+        <li>페이지 안 다른 사이트 iframe의 이미지 추출</li>
+      </ul>
+      <p id="permState" class="count-line"></p>
+      <div class="row"><button id="grant" class="btn primary" type="button">모든 사이트 접근 허용</button><button id="revoke" class="btn" type="button">권한 해제</button></div>
+    </section>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

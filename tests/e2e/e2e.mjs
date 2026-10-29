@@ -1,37 +1,54 @@
-// End-to-end test: loads the unpacked extension into Chrome for Testing,
-// analyses the local fixture site, drives the viewer, downloads and the paste screen.
-//   npm run test:e2e            (set SCREENSHOTS=dir to keep screenshots)
+// End-to-end test: loads the extension into Chrome for Testing and drives the
+// real UI against the local fixture site. Numbers in [] refer to the test list
+// in docs/TEST_REPORT.md.
+//
+//   npm run test:e2e        (E2E_PORT=…, SCREENSHOTS=dir, E2E_REPORT=file.json)
+//
+// Puppeteer cannot click the toolbar button, so it cannot trigger the activeTab
+// grant. The test therefore loads a copy of the extension whose manifest also
+// grants http://127.0.0.1/* — the same access activeTab gives for that page.
+// http://localhost:<port> stays without permission, to test that path.
 import puppeteer from 'puppeteer';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startServer } from '../fixtures/server.mjs';
+import { startServer, setFile } from '../fixtures/server.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const extPath = path.join(root, 'extension');
 const PORT = Number(process.env.E2E_PORT) || 8765;
 const SITE = `http://127.0.0.1:${PORT}`;
+const OTHER = `http://localhost:${PORT}`; // a second origin the extension has no permission for
 const shots = process.env.SCREENSHOTS;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const results = [];
 async function step(name, fn) {
   const t = Date.now();
   try {
-    await fn();
-    results.push({ name, ok: true, ms: Date.now() - t });
-    console.log(`  ✔ ${name}`);
+    const note = await fn();
+    results.push({ name, ok: true, ms: Date.now() - t, note: note || '' });
+    console.log(`  ✔ ${name}${note ? ` — ${note}` : ''}`);
   } catch (e) {
     results.push({ name, ok: false, ms: Date.now() - t, error: e.message });
     console.log(`  ✖ ${name}\n      ${e.message.split('\n').join('\n      ')}`);
   }
 }
 
+// ---- setup ---------------------------------------------------------------
 const server = await startServer(PORT);
-const profile = mkdtempSync(path.join(tmpdir(), 'ih-profile-'));
-const downloadDir = mkdtempSync(path.join(tmpdir(), 'ih-downloads-'));
+const tmp = mkdtempSync(path.join(tmpdir(), 'ih-e2e-'));
+const extPath = path.join(tmp, 'extension');
+cpSync(path.join(root, 'extension'), extPath, { recursive: true });
+const manifest = JSON.parse(readFileSync(path.join(extPath, 'manifest.json'), 'utf8'));
+manifest.host_permissions = ['http://127.0.0.1/*'];
+writeFileSync(path.join(extPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+const profile = path.join(tmp, 'profile');
+const downloadDir = path.join(tmp, 'downloads');
 mkdirSync(path.join(profile, 'Default'), { recursive: true });
+mkdirSync(downloadDir);
 writeFileSync(path.join(profile, 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: downloadDir, prompt_for_download: false } }));
 
 const browser = await puppeteer.launch({
@@ -42,243 +59,527 @@ const browser = await puppeteer.launch({
   args: ['--no-sandbox', '--window-size=1400,1000'],
   defaultViewport: { width: 1400, height: 1000 },
 });
-
-const swTarget = await browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().endsWith('/background.js'));
-const sw = await swTarget.worker();
+const findWorker = () => browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().endsWith('/background.js'));
+let swTarget = await findWorker();
 const extId = new URL(swTarget.url()).host;
+const consoleErrors = [];
 
-const site = await browser.newPage();
-await site.goto(`${SITE}/`, { waitUntil: 'load' });
-const [{ id: tabId }] = await sw.evaluate((u) => chrome.tabs.query({ url: u }), `${SITE}/*`);
-
-const app = await browser.newPage();
-app.on('pageerror', (e) => console.log('    [app error]', e.message));
-await app.goto(`chrome-extension://${extId}/app/app.html?tabId=${tabId}`);
-
-const waitScan = () => app.waitForFunction(() => /더 큰 원본 발견|새로 찾은 이미지가 없습니다/.test(document.querySelector('#scanStatus').textContent), { timeout: 60000 });
-const cards = () =>
+async function openSite(p) {
+  const page = await browser.newPage();
+  await page.goto(SITE + p, { waitUntil: 'load' });
+  const sw = await swTarget.worker();
+  const tabs = await sw.evaluate((u) => chrome.tabs.query({ url: u }), SITE + p.split('?')[0] + '*');
+  return { page, tabId: tabs[tabs.length - 1].id };
+}
+async function openApp(query) {
+  const app = await browser.newPage();
+  app.on('pageerror', (e) => consoleErrors.push(e.message));
+  // Chrome logs refused network requests itself; the fixture deliberately has refusing
+  // origins (404, 403, no-permission localhost). Only script errors count here.
+  app.on('console', (m) => m.type() === 'error' && !/Failed to load resource|blocked by CORS policy: No 'Access-Control-Allow-Origin'/.test(m.text()) && consoleErrors.push(m.text()));
+  await app.goto(`chrome-extension://${extId}/app/app.html?${query}`);
+  return app;
+}
+const waitScan = (app, timeout = 60000) =>
+  app.waitForFunction(() => /새로 발견/.test(document.querySelector('#scanStatus').textContent), { timeout });
+const cards = (app) =>
   app.$$eval('#grid .card', (els) =>
     els.map((el) => ({
-      url: el.querySelector('.name').title,
+      id: el.dataset.id,
+      seq: el.querySelector('.seq').textContent,
+      url: el.querySelector('.name a')?.href || el.querySelector('.name').textContent,
       dims: el.querySelector('.dims').textContent,
+      sub: el.querySelector('.sub').textContent,
       badges: [...el.querySelectorAll('.badge')].map((b) => b.textContent),
+      checked: el.querySelector('.pick').checked,
+      disabled: el.querySelector('.pick').disabled,
     })),
   );
 const byPath = (list, p) => list.find((c) => c.url === SITE + p);
-const swState = () => app.evaluate(() => chrome.runtime.sendMessage({ type: 'snapshot' }));
-const files = (dir) => (existsSync(dir) ? readdirSync(dir).sort() : []);
+const countLine = (app) => app.$eval('#countLine', (e) => e.textContent);
+const snapshot = (page) =>
+  Promise.race([
+    page.evaluate(() => chrome.runtime.sendMessage({ type: 'snapshot' }).then((r) => r.jobs)),
+    sleep(5000).then(() => {
+      throw new Error('snapshot timed out');
+    }),
+  ]);
+const files = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => !f.endsWith('.crdownload')).sort() : []);
+async function until(fn, timeout = 30000, label = 'condition') {
+  const end = Date.now() + timeout;
+  let last;
+  while (Date.now() < end) {
+    last = await fn();
+    if (last) return last;
+    await sleep(200);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+const settled = (jobs) => jobs.every((j) => ['success', 'failed', 'cancelled'].includes(j.status));
 
 console.log('Image Hunter E2E');
 
+// ===========================================================================
+const main = await openSite('/');
+const app = await openApp(`tabId=${main.tabId}`);
+const MAIN_DIR = path.join(downloadDir, 'ImageHunter', 'Image Hunter 테스트 페이지');
 let list;
-await step('collects img / srcset / picture / CSS background / links and removes duplicates', async () => {
-  await waitScan();
-  list = await cards();
-  assert.equal(list.length, 12, `expected 12 images, got ${list.length}: ${list.map((c) => c.url).join(', ')}`);
-  for (const p of ['/img/plain-large.png', '/img/bg-hero.png', '/img/dup.png', '/img/no-ext-image']) assert.ok(byPath(list, p), `missing ${p}`);
-});
 
-await step('srcset: the largest verified candidate is the original', async () => {
-  const a = byPath(list, '/img/sizes/a-1920.png');
-  assert.ok(a, 'a-1920 not chosen');
-  assert.match(a.dims, /1920 × 1280 · PNG/);
-  assert.ok(a.badges.includes('원본 발견'));
-  assert.ok(byPath(list, '/img/sizes/b-2x.png'), 'x-descriptor srcset');
-  assert.ok(byPath(list, '/img/pic-large.png'), '<picture> source');
-  assert.ok(!byPath(list, '/img/sizes/a-480.png'), 'thumbnail size should collapse into the original');
-});
-
-await step('thumbnail link and URL variant lead to originals', async () => {
-  const cat = byPath(list, '/img/gallery/full/cat.png');
-  assert.ok(cat && /3200 × 2400/.test(cat.dims) && cat.badges.includes('링크'), JSON.stringify(cat));
-  const wp = byPath(list, '/uploads/photo.png');
-  assert.ok(wp && /2700 × 1800/.test(wp.dims) && wp.badges.includes('변형 URL'), JSON.stringify(wp));
-});
-
-await step('thumbnails and unverifiable images are flagged', async () => {
-  const icon = byPath(list, '/img/icon-thumb.png');
-  assert.ok(icon.badges.includes('썸네일 의심'), JSON.stringify(icon));
-  const broken = byPath(list, '/img/missing.png');
-  assert.ok(broken.badges.includes('원본 후보 없음') && broken.badges.includes('원본 확인 필요'), JSON.stringify(broken));
-});
-
-await step('file size shown only when verified, Referer-protected image loads', async () => {
-  const plain = byPath(list, '/img/plain-large.png');
-  assert.match(plain.dims, /2400 × 1600 · PNG · [\d.]+ (KB|MB)/);
-  const prot = byPath(list, '/protected/secret.png');
-  assert.match(prot.dims, /1500 × 1000/, 'Referer rule should let the protected image load: ' + prot.dims);
-  assert.equal(byPath(list, '/img/missing.png').dims, '해상도 미확인 · PNG');
-});
-
-await step('scroll and rescan finds lazy-loaded images, keeps selection', async () => {
-  await app.click('#grid .card .pick');
-  await app.click('#btnScrollScan');
-  await app.waitForFunction(() => document.querySelectorAll('#grid .card').length >= 14, { timeout: 90000 });
-  await waitScan();
-  list = await cards();
-  assert.equal(list.length, 14);
-  assert.ok(byPath(list, '/img/lazy-1.png') && byPath(list, '/img/lazy-2.png'));
-  assert.match(await app.$eval('#countLine', (e) => e.textContent), /선택 1/);
-});
-
-await step('filters: min width, format, exclude thumbnails; sorting', async () => {
-  await app.type('#fMinW', '1500');
-  await app.waitForFunction(() => /표시 [1-9] \/ 전체 14/.test(document.querySelector('#countLine').textContent));
-  let l = await cards();
-  assert.ok(l.length > 0 && l.every((c) => Number(c.dims.split(' × ')[0]) >= 1500), l.map((c) => c.dims).join(' | '));
-  await app.$eval('#fMinW', (e) => { e.value = ''; e.dispatchEvent(new Event('input')); });
-  await app.click('#fNoThumb');
-  await new Promise((r) => setTimeout(r, 150));
-  l = await cards();
-  assert.ok(!l.some((c) => c.badges.includes('썸네일 의심')));
-  await app.click('#fNoThumb');
-  await app.select('#sortKey', 'area');
-  await app.click('#sortDir'); // descending
-  await new Promise((r) => setTimeout(r, 150));
-  l = await cards();
-  assert.equal(l[0].url, SITE + '/img/gallery/full/cat.png');
-  await app.select('#sortKey', 'order');
-  await app.click('#sortDir');
-});
-
-await step('select all / none / filtered only', async () => {
-  await app.click('#btnSelectAll');
-  await app.waitForFunction(() => /선택 14/.test(document.querySelector('#countLine').textContent));
-  await app.click('#btnSelectNone');
-  await app.waitForFunction(() => /선택 0/.test(document.querySelector('#countLine').textContent));
-  await app.click('#fNoThumb');
-  await app.click('#btnSelectFiltered');
-  const shown = await app.$$eval('#grid .card', (e) => e.length);
-  await app.waitForFunction((n) => new RegExp(`선택 ${n}\\b`).test(document.querySelector('#countLine').textContent), {}, shown);
-  await app.click('#fNoThumb');
-  await app.click('#btnSelectNone');
-});
-
-await step('sequential viewer: buttons, arrow keys, select, thumbnail exclusion', async () => {
-  await app.click('#btnViewer');
-  await app.waitForSelector('#viewer:not([hidden])');
-  const counter = () => app.$eval('#vCounter', (e) => e.textContent);
-  assert.equal(await counter(), '이미지 1 / 14');
-  await app.waitForFunction(() => !document.querySelector('#vImg').hidden && document.querySelector('#vImg').naturalWidth > 0);
-  assert.equal(await app.$eval('#vImg', (e) => e.naturalWidth), 2400, 'viewer shows the original, not the thumbnail');
-  await app.keyboard.press('ArrowRight');
-  assert.equal(await counter(), '이미지 2 / 14');
-  await app.click('#vNext');
-  assert.equal(await counter(), '이미지 3 / 14');
-  await app.keyboard.press('ArrowLeft');
-  assert.equal(await counter(), '이미지 2 / 14');
-  await app.keyboard.press(' ');
-  assert.equal(await app.$eval('#vSelect', (e) => e.checked), true);
-  await app.click('#vNoThumb');
-  await app.waitForFunction(() => /\/ 1[0-3]$/.test(document.querySelector('#vCounter').textContent), { timeout: 5000 });
-  await app.click('#vNoThumb');
-  await app.waitForFunction(() => /\/ 14$/.test(document.querySelector('#vCounter').textContent), { timeout: 5000 });
-  if (shots) await app.screenshot({ path: path.join(shots, 'viewer.png') });
-});
-
-await step('viewer: failed image shows an error and allows moving on', async () => {
-  await app.keyboard.press('End');
-  // Walk back to the broken image
-  for (let i = 0; i < 14; i++) {
-    const name = await app.$eval('#vUrl', (e) => e.textContent);
-    if (name.endsWith('/img/missing.png')) break;
-    await app.keyboard.press('ArrowLeft');
+await step('[1][2][3][4][5][7] img·srcset·data-src·CSS 배경·이미지 링크 수집, 같은 URL 중복 제거', async () => {
+  await waitScan(app);
+  list = await cards(app);
+  const paths = list.map((c) => c.url.replace(SITE, ''));
+  for (const p of ['/img/plain-large.png', '/img/sizes/a-1920.png', '/img/bg-hero.png', '/img/gallery/full/cat.png', '/img/lazy-data-src.png', '/img/hd/data-hd.png', '/img/dup.png']) {
+    assert.ok(paths.includes(p), `missing ${p}`);
   }
-  await app.waitForSelector('#vError:not([hidden])', { timeout: 10000 });
-  const before = await app.$eval('#vCounter', (e) => e.textContent);
-  await app.click('#vErrNext');
-  assert.notEqual(await app.$eval('#vCounter', (e) => e.textContent), before);
-  await app.keyboard.press('Escape');
-  assert.equal(await app.$eval('#viewer', (e) => e.hidden), true);
+  assert.equal(paths.filter((p) => p === '/img/dup.png').length, 1, 'dup.png ×3 → 1');
+  assert.equal(paths.filter((p) => p === '/img/plain-large.png').length, 1, 'og:image = plain-large → merged');
+  assert.equal(list.length, 17, paths.join(', '));
+  assert.match(await countLine(app), /같은 URL 3개는 첫 항목으로 합침/);
+  return `${list.length}개`;
 });
 
-const siteDir = path.join(downloadDir, 'Image Hunter', '127.0.0.1');
-await step('batch download into Image Hunter/<site>/ with server names, progress and failure reasons', async () => {
+await step('목록 항목 정보: 순번·해상도·종횡비·확장자·크기·원본 상태', async () => {
+  const a = byPath(list, '/img/sizes/a-1920.png');
+  assert.equal(a.dims, '1920 × 1280 · 3:2');
+  assert.match(a.sub, /^PNG · [\d.]+ KB$/);
+  assert.ok(a.badges.includes('고해상도 후보') && a.badges.includes('srcset'), a.badges.join());
+  assert.deepEqual(list.map((c) => c.seq), list.map((_, i) => `#${i + 1}`));
+  const plain = byPath(list, '/img/plain-large.png');
+  assert.ok(plain.badges.includes('원본 후보 확인'), plain.badges.join());
+});
+
+await step('[8] 썸네일과 다른 URL의 원본: 링크·data-hd 속성으로 찾음, URL 패턴 추측은 기본 꺼짐', async () => {
+  const cat = byPath(list, '/img/gallery/full/cat.png');
+  assert.equal(cat.dims, '3200 × 2400 · 4:3');
+  assert.ok(cat.badges.includes('고해상도 후보') && cat.badges.includes('링크'));
+  const hd = byPath(list, '/img/hd/data-hd.png');
+  assert.match(hd.dims, /^2000 × 1500/);
+  const wp = byPath(list, '/uploads/photo-300x200.png');
+  assert.ok(wp, 'without guessing, the WordPress thumbnail stays as is');
+  assert.ok(wp.badges.includes('후보 비교 필요') && wp.badges.includes('썸네일 의심'), wp.badges.join());
+});
+
+await step('[9][10] 접근할 수 없는 이미지와 잘못된 URL은 오류 상태로 표시, 나머지는 계속 처리', async () => {
+  // The page itself displayed it, so its size is known; the URL itself is refused to the extension.
+  const prot = byPath(list, '/protected/secret.png');
+  assert.equal(prot.dims, '1500 × 1000 · 3:2');
+  assert.ok(prot.badges.includes('확인 불가'), prot.badges.join());
+  const missing = byPath(list, '/img/missing.png');
+  assert.ok(missing.badges.includes('확인 불가'));
+  const broken = list.filter((c) => c.disabled);
+  assert.equal(broken.length, 3, 'invalid, javascript:, blob:');
+  assert.deepEqual(broken.map((c) => c.badges[0]).sort(), ['blob URL', '잘못된 URL', '잘못된 URL']);
+  assert.ok(broken.every((c) => c.dims === '다운로드 불가'));
+});
+
+await step('후보 선택 UI: 항목의 다운로드 URL을 바꿔도 순서·선택 유지', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  const idx = list.findIndex((c) => c.url.endsWith('/a-1920.png'));
+  await app.click(`#grid .card:nth-child(${idx + 1}) .pick`);
+  await app.select(`#grid .card:nth-child(${idx + 1}) .cand`, `${SITE}/img/sizes/a-480.png`);
+  await app.waitForFunction((i) => document.querySelector(`#grid .card:nth-child(${i}) .dims`).textContent.startsWith('480 × 320'), {}, idx + 1);
+  let now = await cards(app);
+  assert.equal(now[idx].id, list[idx].id);
+  assert.ok(now[idx].checked);
+  assert.ok(now[idx].badges.some((b) => b.includes('(직접 선택)')));
+  await app.select(`#grid .card:nth-child(${idx + 1}) .cand`, `${SITE}/img/sizes/a-1920.png`);
+  await app.click(`#grid .card:nth-child(${idx + 1}) .pick`);
+  now = await cards(app);
+  assert.match(now[idx].dims, /^1920/);
+});
+
+await step('[15][16] 모두 선택·모두 해제·표시된 항목만 선택, 숨겨진 선택 유지', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.click('#btnSelectAll');
+  await app.waitForFunction(() => /선택 14개/.test(document.querySelector('#countLine').textContent)); // 17 - 3 broken
+  await app.click('#btnSelectNone');
+  await app.waitForFunction(() => /선택 0개/.test(document.querySelector('#countLine').textContent));
+  const c = await cards(app);
+  await app.click(`#grid .card:nth-child(1) .pick`);
+  await app.click(`#grid .card:nth-child(3) .pick`);
+  await app.click('#fNoThumb');
+  await app.waitForFunction(() => /선택 2개/.test(document.querySelector('#countLine').textContent));
+  await app.click('#btnSelectVisible');
+  const shown = (await cards(app)).filter((x) => !x.disabled).length;
+  await app.waitForFunction((n) => new RegExp(`선택 ${n}개`).test(document.querySelector('#countLine').textContent), {}, shown);
+  await app.click('#fNoThumb');
+  await app.click('#btnSelectNone');
+  return `표시 항목 ${shown}개 선택 (${c.length - shown}개 숨김/불가)`;
+});
+
+await step('[6] 스크롤하며 추가 검색: 지연 로딩 이미지가 페이지 위치에 추가', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.click('#grid .card:nth-child(2) .pick');
+  await app.click('#btnScrollScan');
+  await app.waitForFunction(() => /새로 발견 2개/.test(document.querySelector('#scanStatus').textContent), { timeout: 90000 });
+  list = await cards(app);
+  assert.equal(list.length, 19);
+  assert.deepEqual(list.slice(-2).map((c) => c.url.replace(SITE, '')), ['/img/lazy-1.png', '/img/lazy-2.png']);
+  assert.ok(list[1].checked, 'selection kept');
+  await app.click('#grid .card:nth-child(2) .pick');
+});
+
+// ===========================================================================
+const ord = await openSite('/order');
+const oapp = await openApp(`tabId=${ord.tabId}`);
+const ORDER_DIR = path.join(downloadDir, 'ImageHunter', '순서 테스트');
+let olist;
+
+await step('[11][12] DOM 순서 유지: 파일명 알파벳·해상도 순서와 다름, CSS 배경 섞임', async () => {
+  await waitScan(oapp);
+  olist = await cards(oapp);
+  assert.deepEqual(olist.map((c) => c.url.replace(SITE, '/')), ['//order/zebra-1200.png', '//order/bg-mid.png', '//order/apple.png', '//order/mango.png']);
+  assert.deepEqual(olist.map((c) => c.seq), ['#1', '#2', '#3', '#4']);
+});
+
+await step('[13] 미리보기 크기 변경: 순서·URL·선택·필터 그대로', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await oapp.click('#grid .card:nth-child(3) .pick');
+  const before = await cards(oapp);
+  for (const size of ['small', 'large', 'medium']) {
+    await oapp.click(`.segmented button[data-size="${size}"]`);
+    await sleep(100);
+    assert.ok(await oapp.$eval('#grid', (g, s) => g.classList.contains(`size-${s}`), size));
+    const after = await cards(oapp);
+    assert.deepEqual(after.map((c) => [c.id, c.url, c.checked, c.dims]), before.map((c) => [c.id, c.url, c.checked, c.dims]));
+  }
+  const stored = await oapp.evaluate(() => chrome.storage.local.get('settings').then((r) => r.settings.previewSize));
+  assert.equal(stored, 'medium');
+});
+
+await step('[14] 해상도 필터 후 상대 순서 유지, 숨겨진 선택 보존', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await oapp.type('#fMinW', '700');
+  await oapp.waitForFunction(() => /표시 3개/.test(document.querySelector('#countLine').textContent));
+  const f = await cards(oapp);
+  assert.deepEqual(f.map((c) => c.seq), ['#1', '#2', '#4']);
+  assert.match(await countLine(oapp), /선택 1개 \(필터로 숨겨진 선택 1개 유지\)/);
+  await oapp.type('#fMinW', '-'); // "700-" → invalid
+  await oapp.$eval('#fMinW', (e) => { e.value = '-5'; e.dispatchEvent(new Event('input')); });
+  await oapp.waitForFunction(() => /0 이상/.test(document.querySelector('#filterError').textContent));
+  await oapp.$eval('#fMinW', (e) => { e.value = ''; e.dispatchEvent(new Event('input')); });
+  await oapp.waitForFunction(() => /표시 4개/.test(document.querySelector('#countLine').textContent));
+});
+
+await step('[17] 재검색: 새 요소는 DOM 위치에 삽입, 기존 순서·선택 유지', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await ord.page.evaluate(() => {
+    const i = document.createElement('img');
+    i.src = '/order/kiwi.png';
+    document.getElementById('slot').append(i);
+  });
+  await oapp.click('#btnScan');
+  await oapp.waitForFunction(() => /새로 발견 1개/.test(document.querySelector('#scanStatus').textContent));
+  const after = await cards(oapp);
+  assert.deepEqual(after.map((c) => c.url.replace(`${SITE}/order/`, '')), ['zebra-1200.png', 'bg-mid.png', 'apple.png', 'kiwi.png', 'mango.png']);
+  assert.ok(after[2].checked, 'apple still selected');
+  assert.deepEqual(after.map((c) => c.id).filter((id) => olist.some((o) => o.id === id)), olist.map((o) => o.id));
+});
+
+await step('PDF로 저장: 선택 순서(페이지 순서) 그대로 한 파일', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await oapp.click('#btnSelectAll');
+  await oapp.click('#btnPdf');
+  await oapp.waitForFunction(() => /PDF 저장: 5장 포함/.test(document.querySelector('#pdfStatus').textContent), { timeout: 60000 });
+  const pdfPath = path.join(ORDER_DIR, '순서 테스트.pdf');
+  await until(() => existsSync(pdfPath), 20000, 'pdf file');
+  const text = readFileSync(pdfPath).toString('latin1');
+  assert.ok(text.startsWith('%PDF-1.4'));
+  assert.equal((text.match(/\/Type \/Page /g) || []).length, 5);
+  const widths = [...text.matchAll(/\/Subtype \/Image \/Width (\d+)/g)].map((m) => Number(m[1]));
+  assert.deepEqual(widths, [1200, 900, 600, 700, 4000]);
+  await oapp.click('#btnSelectNone');
+  return `${(readFileSync(pdfPath).length / 1024).toFixed(0)} KB`;
+});
+
+// ===========================================================================
+await step('[19][23] 일괄 다운로드: ImageHunter/페이지 제목/ 폴더, 서버 파일명, 진행 상태', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
   await app.click('#btnSelectAll');
   await app.click('#btnDownload');
-  const deadline = Date.now() + 60000;
-  let s;
-  while (Date.now() < deadline) {
-    s = await swState();
-    if (s?.items?.length === 14 && s.items.every((i) => ['complete', 'failed', 'cancelled'].includes(i.status))) break;
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  if (process.env.DEBUG) console.log(JSON.stringify(s.items.map((i) => [i.url, i.status, i.error, i.filename]), null, 1));
-  const failed = s.items.filter((i) => i.status === 'failed');
-  assert.equal(s.items.filter((i) => i.status === 'complete').length, 13, JSON.stringify(failed));
-  assert.deepEqual(failed.map((i) => [i.url.replace(SITE, ''), i.error]), [['/img/missing.png', '찾을 수 없음 (404)']]);
-  const got = files(siteDir);
-  for (const f of ['plain-large.png', 'a-1920.png', 'b-2x.png', 'pic-large.png', 'bg-hero.png', 'cat.png', 'photo.png', 'server-named.png', 'secret.png', 'dup.png', 'lazy-1.png', 'lazy-2.png', 'icon-thumb.png']) {
+  const jobs = await until(async () => {
+    const j = await snapshot(app);
+    return j.length >= 16 && settled(j) && j;
+  }, 60000, 'downloads');
+  const ok = jobs.filter((j) => j.status === 'success');
+  const failed = jobs.filter((j) => j.status === 'failed');
+  assert.equal(ok.length, 14, JSON.stringify(failed.map((j) => [j.url, j.error])));
+  const got = files(MAIN_DIR);
+  for (const f of ['plain-large.png', 'a-1920.png', 'b-2x.png', 'pic-large.png', 'bg-hero.png', 'cat.png', 'photo-300x200.png', 'icon-thumb.png', 'server-named.png', 'dup.png', 'lazy-data-src.png', 'data-hd.png', 'lazy-1.png', 'lazy-2.png']) {
     assert.ok(got.includes(f), `missing ${f}; got ${got.join(', ')}`);
   }
-  assert.ok(!got.some((f) => f.includes('?')));
+  assert.ok(jobs.every((j) => j.source === 'page' && j.itemKey));
+  const c = await cards(app);
+  assert.ok(byPath(c, '/img/plain-large.png').badges.includes('다운로드 완료'));
 });
 
-await step('downloads view: states and retry of failed items', async () => {
+await step('[9] 핫링크 방지·없는 이미지: 우회하지 않고 실패 사유 표시', async () => {
+  const jobs = await snapshot(app);
+  const f = Object.fromEntries(jobs.filter((j) => j.status === 'failed').map((j) => [j.url.replace(SITE, ''), j.error]));
+  assert.deepEqual(f, {
+    '/protected/secret.png': '접근 거부 (403) — 사이트가 외부 다운로드를 막았을 수 있음',
+    '/img/missing.png': '서버가 파일을 제공하지 않음 (404 등)',
+  });
+  const c = await cards(app);
+  assert.ok(byPath(c, '/protected/secret.png').badges.includes('다운로드 실패'));
+});
+
+await step('[21] 실패 항목만 재시도, 성공 항목은 다시 받지 않음', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  const before = await snapshot(app);
+  await app.click('#btnDownload'); // same selection again
+  await app.waitForFunction(() => /실패·취소했던 2개 다시 시도, 이미 받았거나 진행 중인 14개 제외/.test(document.querySelector('#toast').textContent));
+  let jobs = await until(async () => {
+    const j = await snapshot(app);
+    return settled(j) && j.filter((x) => x.attempts === 2).length === 2 && j;
+  }, 20000, 're-selected failed items retried');
+  assert.equal(jobs.length, before.length, 're-selecting failed items retried them; no duplicate jobs');
   await app.click('.tab[data-view="downloads"]');
-  await app.waitForFunction(() => /완료 13/.test(document.querySelector('#dlSummary').textContent) && /실패 1/.test(document.querySelector('#dlSummary').textContent));
-  const errs = await app.$$eval('#dlTable td.err', (e) => e.map((x) => x.textContent).filter(Boolean));
-  assert.deepEqual(errs, ['찾을 수 없음 (404)']);
-  if (shots) await app.screenshot({ path: path.join(shots, 'downloads.png') });
   await app.click('#dlRetryFailed');
-  await app.waitForFunction(() => /실패 1/.test(document.querySelector('#dlSummary').textContent) && /진행 중 0/.test(document.querySelector('#dlSummary').textContent) && /대기 0/.test(document.querySelector('#dlSummary').textContent), { timeout: 20000 });
+  jobs = await until(async () => {
+    const j = await snapshot(app);
+    return settled(j) && j.filter((x) => x.attempts === 3).length === 2 && j;
+  }, 20000, 'retry failed');
+  assert.ok(jobs.filter((j) => j.status === 'success').every((j) => j.attempts === 1), 'successful files not downloaded twice');
+  assert.equal(jobs.filter((j) => j.status === 'failed').length, 2);
+  if (shots) await app.screenshot({ path: path.join(shots, 'downloads.png') });
 });
 
-await step('name collisions never overwrite: second download gets _001', async () => {
-  await app.click('.tab[data-view="analyze"]');
-  const idx = list.findIndex((c) => c.url === SITE + '/img/gallery/full/cat.png');
-  const cardsEl = await app.$$('#grid .card .thumb');
-  await cardsEl[idx].click();
-  await app.waitForSelector('#viewer:not([hidden])');
-  await app.keyboard.press('d');
-  await app.keyboard.press('Escape');
-  const deadline = Date.now() + 20000;
-  while (!files(siteDir).includes('cat_001.png') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 300));
-  assert.ok(files(siteDir).includes('cat_001.png'), files(siteDir).join(', '));
+await step('[24] 다운로드 결과 CSV·JSON 내보내기', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.click('#dlExportCsv');
+  await app.click('#dlExportJson');
+  const dir = path.join(downloadDir, 'ImageHunter');
+  const csv = await until(() => files(dir).find((f) => /^download_result_.*\.csv$/.test(f)), 10000, 'csv').catch(async (e) => {
+    const recent = await app.evaluate(() => chrome.downloads.search({ orderBy: ['-startTime'], limit: 3 }).then((l) => l.map((d) => [d.state, d.error, d.danger, d.filename.split('/').slice(-2).join('/')])));
+    throw new Error(`${e.message}; toast="${await app.$eval('#toast', (t) => t.textContent)}"; recent=${JSON.stringify(recent)}`);
+  });
+  const json = await until(() => files(dir).find((f) => /^download_result_.*\.json$/.test(f)), 10000, 'json');
+  const csvText = readFileSync(path.join(dir, csv), 'utf8');
+  assert.ok(csvText.startsWith('﻿원본 URL,다운로드 URL,파일명'));
+  const data = JSON.parse(readFileSync(path.join(dir, json), 'utf8'));
+  const jobs = await snapshot(app);
+  assert.equal(data.length, jobs.length);
+  assert.ok(data.some((r) => r.status === 'failed' && /403/.test(r.error)));
+  assert.ok(data.filter((r) => r.status === 'success').every((r) => r.filename.startsWith('ImageHunter/Image Hunter 테스트 페이지/') && r.finishedAt));
+  return `${csv}, ${json}`;
 });
 
-await step('paste URLs: validation, dedupe, preview check, custom name, page URL detection, download', async () => {
+// ===========================================================================
+// A real JPEG for the PDF pass-through check, made by the browser.
+const jpegB64 = await app.evaluate(async () => {
+  const c = new OffscreenCanvas(320, 240);
+  const g = c.getContext('2d');
+  g.fillStyle = '#c33';
+  g.fillRect(0, 0, 320, 240);
+  g.fillStyle = '#3c3';
+  g.fillRect(40, 40, 120, 80);
+  const b = await c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+  const bytes = new Uint8Array(await b.arrayBuffer());
+  let s = '';
+  for (const x of bytes) s += String.fromCharCode(x);
+  return btoa(s);
+});
+const jpegBytes = Buffer.from(jpegB64, 'base64');
+setFile('/files/photo.jpg', jpegBytes, 'image/jpeg');
+
+await step('[25][26] URL 직접 입력: 입력 순서 유지, 잘못된 URL 목록, 중복 제거', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
   await app.click('.tab[data-view="paste"]');
   await app.$eval('#pasteText', (e, s) => {
-    e.value = [
-      `${s}/img/sizes/a-960.png`,
-      `${s}/img/sizes/a-960.png#dup`,
-      `${s}/img/dup.png  내가정한이름`,
-      `${s}/webtoon/1`,
-      `${s}/img/nothing-here.png`,
-      'ftp://x/y.png',
-    ].join('\n');
+    e.value = [`${s}/order/zebra-400.png`, `${s}/order/apple.png  사과`, `${s}/order/zebra-400.png#dup`, 'not a url', 'ftp://x/y.png', `${s}/order/mango.png`].join('\n');
   }, SITE);
-  await app.type('#pasteFolder', '붙여넣기');
+  await app.$eval('#pasteFolder', (e) => (e.value = '입력순서'));
   await app.click('#btnPasteParse');
-  assert.match(await app.$eval('#pasteSummary', (e) => e.textContent), /유효한 URL 4개 · 중복 제거 1개 · 형식 오류 1개/);
-  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  assert.match(await app.$eval('#pasteSummary', (e) => e.textContent), /유효한 URL 3개 · 중복 제거 1개 · 잘못된 URL 2개/);
+  const invalid = await app.$$eval('#pasteInvalid li', (l) => l.map((x) => x.textContent));
+  assert.deepEqual(invalid.map((t) => t.split(':')[0]), ['4번째 줄', '5번째 줄']);
   const rows = await app.$$eval('#pasteTable tbody tr', (trs) => trs.map((tr) => tr.children[3].textContent));
-  assert.match(rows[0], /✓ 다운로드 가능 · 960×640 · PNG/);
-  assert.match(rows[2], /웹페이지 주소입니다/);
-  assert.match(rows[3], /찾을 수 없음 \(404\)/);
-  if (shots) await app.screenshot({ path: path.join(shots, 'paste.png') });
-  await app.click('#pasteDlSel');
-  const dir = path.join(downloadDir, 'Image Hunter', '127.0.0.1', '붙여넣기');
-  const deadline = Date.now() + 20000;
-  while (files(dir).length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 300));
-  assert.deepEqual(files(dir), ['a-960.png', '내가정한이름.png']);
-  await app.waitForFunction(() => /실패 1/.test(document.querySelector('#pasteCount').textContent), { timeout: 20000 });
+  assert.deepEqual(rows.map((u) => u.split('/').pop()), ['zebra-400.png', 'apple.png', 'mango.png']);
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  await app.click('#pasteDlAll');
+  const dir = path.join(downloadDir, 'ImageHunter', '입력순서');
+  await until(() => files(dir).length === 3, 20000, 'paste files');
+  // the custom name "사과" (given after the URL) wins and gets the verified extension
+  assert.deepEqual(files(dir), ['mango.png', 'zebra-400.png', '사과.png']);
+  const jobs = (await snapshot(app)).filter((j) => j.source === 'paste');
+  assert.deepEqual(jobs.map((j) => j.url.split('/').pop()), ['zebra-400.png', 'apple.png', 'mango.png'], 'queued in input order');
+  assert.equal(jobs[1].filename, 'ImageHunter/입력순서/사과.png');
 });
 
-await step('failed URL list export', async () => {
-  await app.click('#pasteExport');
-  await new Promise((r) => setTimeout(r, 1500));
-  if (process.env.DEBUG) console.log('toast:', await app.$eval('#toast', (e) => e.textContent), JSON.stringify(await app.evaluate(async () => (await chrome.downloads.search({ orderBy: ['-startTime'], limit: 2 })).map((d) => [d.url.slice(0, 40), d.filename, d.state, d.error]))));
-  const deadline = Date.now() + 10000;
-  const dir = path.join(downloadDir, 'Image Hunter');
-  while (!files(dir).some((f) => f.startsWith('failed_urls_')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 300));
-  assert.ok(files(dir).some((f) => f.startsWith('failed_urls_')), files(dir).join(', '));
+await step('[20] 파일명 충돌: 다른 URL의 같은 이름 → "이름 (1)"로 모두 저장', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.$eval('#pasteText', (e, s) => (e.value = [`${s}/img/dup.png`, `${s}/cors/img/dup.png`, `${s}/img/dup.png?v=2`].join('\n')), SITE);
+  await app.$eval('#pasteFolder', (e) => (e.value = '충돌'));
+  await app.click('#btnPasteParse');
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  await app.click('#pasteDlAll');
+  const dir = path.join(downloadDir, 'ImageHunter', '충돌');
+  await until(() => files(dir).length === 3, 20000, 'collision files');
+  assert.deepEqual(files(dir), ['dup (1).png', 'dup (2).png', 'dup.png']);
+});
+
+await step('TXT/CSV 불러오기와 다른 사이트(권한 없음) 이미지 처리', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  const csvPath = path.join(tmp, 'list.csv');
+  writeFileSync(csvPath, `﻿url,filename\r\n${SITE}/img/sizes/b-1x.png,첫번째\r\n"${OTHER}/img/plain-large.png",\r\n`);
+  await app.$eval('#pasteText', (e) => (e.value = ''));
+  const input = await app.$('#pasteImport');
+  await input.uploadFile(csvPath);
+  await app.waitForFunction(() => /유효한 URL 2개/.test(document.querySelector('#pasteSummary').textContent));
+  assert.equal(await app.$eval('#pasteText', (e) => e.value.split('\n')[0].split('  ')[1]), '첫번째');
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  const res = await app.$$eval('#pasteTable tbody tr', (trs) => trs.map((tr) => tr.children[4].textContent));
+  // Without permission for localhost the size cannot be read, so it is not shown.
+  assert.match(res[1], /2400×1600 \(3:2\) · PNG \(추정\) · 크기 확인 불가/);
+  assert.match(res[0], /600×400 \(3:2\) · PNG · [\d.]+ KB/);
+});
+
+await step('URL 목록의 PDF: JPEG는 그대로, 읽을 수 없는 이미지는 사유와 함께 제외', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.$eval('#pasteText', (e, [s, o]) => (e.value = [`${s}/files/photo.jpg`, `${s}/order/apple.png`, `${o}/img/plain-large.png`, `${o}/cors/img/dup.png`].join('\n')), [SITE, OTHER]);
+  await app.$eval('#pasteFolder', (e) => (e.value = 'PDF테스트'));
+  await app.click('#btnPasteParse');
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  await app.click('#pastePdf');
+  await app.waitForFunction(() => /PDF (저장|를 만들지)/.test(document.querySelector('#pasteSummary').textContent), { timeout: 30000 });
+  const summary = await app.$eval('#pasteSummary', (e) => e.textContent);
+  assert.match(summary, /^PDF 저장: 3장 → ImageHunter\/PDF테스트\/PDF테스트\.pdf/, summary);
+  assert.match(summary, /3번\(이미지 데이터를 읽을 권한이 없음/);
+  const pdfPath = path.join(downloadDir, 'ImageHunter', 'PDF테스트', 'PDF테스트.pdf');
+  await until(() => existsSync(pdfPath), 10000, 'pdf');
+  const buf = readFileSync(pdfPath);
+  const text = buf.toString('latin1');
+  const imgs = [...text.matchAll(/\/Width (\d+) \/Height (\d+) \/ColorSpace \/\w+ \/BitsPerComponent 8 \/Filter \/(\w+) \/Length (\d+) >>\nstream\n/g)];
+  assert.deepEqual(imgs.map((m) => [Number(m[1]), m[3]]), [[320, 'DCTDecode'], [600, 'FlateDecode'], [900, 'FlateDecode']]);
+  const start = imgs[0].index + imgs[0][0].length;
+  assert.ok(buf.subarray(start, start + Number(imgs[0][4])).equals(jpegBytes), 'JPEG embedded byte-for-byte');
+});
+
+await step('[22] 다운로드 취소', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.$eval('#pasteText', (e, s) => (e.value = `${s}/slow/big.png?cancel`), SITE);
+  await app.$eval('#pasteFolder', (e) => (e.value = '취소'));
+  await app.click('#btnPasteParse');
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  await app.click('#pasteDlAll');
+  const job = await until(async () => (await snapshot(app)).find((j) => j.url.endsWith('?cancel') && j.status === 'downloading' && j.downloadId != null), 10000, 'downloading');
+  await app.evaluate((id) => chrome.runtime.sendMessage({ type: 'cancel', ids: [id] }), job.id);
+  const done = await until(async () => (await snapshot(app)).find((j) => j.id === job.id && j.status === 'cancelled'), 10000, 'cancelled');
+  await sleep(1500);
+  const again = (await snapshot(app)).find((j) => j.id === job.id);
+  assert.equal(again.status, 'cancelled', 'a late Chrome event must not change a cancelled job');
+  assert.deepEqual(files(path.join(downloadDir, 'ImageHunter', '취소')), []);
+  return `${done.bytesReceived} bytes 받은 상태에서 취소`;
+});
+
+await step('[28] 서비스 워커 재시작: 진행 중 다운로드 상태를 복구해 끝까지 추적', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.$eval('#pasteText', (e, s) => (e.value = `${s}/slow/big.png?restart`), SITE);
+  await app.$eval('#pasteFolder', (e) => (e.value = '재시작'));
+  await app.click('#btnPasteParse');
+  await app.waitForFunction(() => ![...document.querySelectorAll('#pasteTable td')].some((td) => td.textContent === '확인 중…'), { timeout: 20000 });
+  await app.click('#pasteDlAll');
+  const job = await until(async () => (await snapshot(app)).find((j) => j.url.endsWith('?restart') && j.status === 'downloading' && j.downloadId != null), 10000, 'downloading');
+  await sleep(700); // let the worker persist its state
+  const worker = await swTarget.worker();
+  await worker.close(); // stops the service worker like Chrome does when idle
+  await sleep(300);
+  // Any extension event restarts it; the app page reconnects on its own.
+  const done = await until(async () => (await snapshot(app).catch(() => [])).find((j) => j.id === job.id && j.status === 'success'), 30000, 'success after restart');
+  swTarget = await findWorker();
+  assert.ok(files(path.join(downloadDir, 'ImageHunter', '재시작')).includes('big.png'));
+  await app.click('.tab[data-view="downloads"]');
+  await app.waitForFunction((id) => document.querySelector(`#dlTable tr[data-job="${id}"] .st`)?.textContent === '완료', {}, job.id);
+  return `job ${done.id}: attempts=${done.attempts}`;
+});
+
+await step('[27] 다운로드 중 원본 탭 이동: 다운로드는 계속, 재검색 시 다른 페이지 목록과 섞이지 않음', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await oapp.click('#btnSelectNone');
+  // Add the slow image to the order page and download it from there.
+  await ord.page.evaluate(() => {
+    const i = document.createElement('img');
+    i.src = '/slow/big.png?nav';
+    document.body.append(i);
+  });
+  await oapp.click('#btnScan');
+  await oapp.waitForFunction(() => /새로 발견 1개/.test(document.querySelector('#scanStatus').textContent), { timeout: 30000 });
+  const last = (await cards(oapp)).at(-1);
+  assert.match(last.url, /slow\/big\.png\?nav$/);
+  await oapp.click('#grid .card:last-child .pick');
+  await oapp.click('#btnDownload');
+  await until(async () => (await snapshot(oapp)).find((j) => j.url.endsWith('?nav') && j.status === 'downloading'), 10000, 'downloading');
+  await ord.page.goto(`${SITE}/webtoon/1`, { waitUntil: 'load' }); // navigate the source tab
+  const job = await until(async () => (await snapshot(oapp)).find((j) => j.url.endsWith('?nav') && ['success', 'failed'].includes(j.status)), 30000, 'nav download');
+  assert.equal(job.status, 'success');
+  await oapp.click('#btnScan');
+  await oapp.waitForFunction(() => /페이지가 바뀌어 목록을 새로 만들었습니다/.test(document.querySelector('#scanStatus').textContent), { timeout: 20000 });
+  const fresh = await cards(oapp);
+  assert.deepEqual(fresh.map((c) => c.url.replace(SITE, '')), ['/img/lazy-1.png', '/img/lazy-2.png']);
+  assert.match(await oapp.$eval('#pageTitle', (e) => e.textContent), /Episode/);
+});
+
+// ===========================================================================
+await step('[18] 이미지 1000장 페이지 성능', async () => {
+  const many = await openSite('/many?n=1000');
+  const t0 = Date.now();
+  const mapp = await openApp(`tabId=${many.tabId}`);
+  await waitScan(mapp, 180000);
+  const tScan = Date.now() - t0;
+  const n = await mapp.$$eval('#grid .card', (e) => e.length);
+  assert.equal(n, 1000);
+  const seqs = await mapp.$$eval('#grid .card', (e) => [e[0], e[499], e[999]].map((x) => x.querySelector('.seq').textContent + ' ' + x.querySelector('img').getAttribute('src').split('/').pop()));
+  assert.deepEqual(seqs, ['#1 0.png', '#500 499.png', '#1000 999.png']);
+  // Responsiveness: select all + filter + preview size change.
+  const t1 = Date.now();
+  await mapp.click('#btnSelectAll');
+  await mapp.waitForFunction(() => /선택 1000개/.test(document.querySelector('#countLine').textContent));
+  await mapp.type('#fMinW', '200');
+  await mapp.waitForFunction(() => !/표시 1000개/.test(document.querySelector('#countLine').textContent));
+  await mapp.click('.segmented button[data-size="small"]');
+  await mapp.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const tUi = Date.now() - t1;
+  assert.ok(tScan < 120000, `scan took ${tScan} ms`);
+  assert.ok(tUi < 5000, `UI took ${tUi} ms`);
+  await mapp.click('.segmented button[data-size="medium"]');
+  await mapp.close();
+  await many.page.close();
+  return `검색+판별 ${(tScan / 1000).toFixed(1)}초, 전체 선택·필터·크기 변경 ${tUi} ms`;
+});
+
+await step('팝업·설정 화면 동작 및 콘솔 오류 없음', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  const popup = await browser.newPage();
+  popup.on('pageerror', (e) => consoleErrors.push('popup: ' + e.message));
+  await popup.goto(`chrome-extension://${extId}/popup/popup.html`);
+  // Opened as a tab here, so "current tab" is the popup itself: analysis must be disabled.
+  assert.equal(await popup.$eval('#analyze', (b) => b.disabled), true);
+  await popup.close();
+  const opt = await browser.newPage();
+  opt.on('pageerror', (e) => consoleErrors.push('options: ' + e.message));
+  await opt.goto(`chrome-extension://${extId}/options/options.html`);
+  await opt.select('select[name="folderMode"]', 'site');
+  await opt.waitForFunction(() => /저장되었습니다/.test(document.querySelector('#saved').textContent));
+  const s = await opt.evaluate(() => chrome.storage.local.get('settings').then((r) => r.settings));
+  assert.equal(s.folderMode, 'site');
+  await opt.select('select[name="folderMode"]', 'page');
+  assert.match(await opt.$eval('#permState', (e) => e.textContent), /메뉴를 연 탭에만 접근/);
+  await opt.close();
+  assert.deepEqual(consoleErrors, []);
 });
 
 if (shots) {
-  await app.click('.tab[data-view="analyze"]');
-  await app.screenshot({ path: path.join(shots, 'analyze.png') });
+  try {
+    await app.bringToFront();
+    await app.click('.tab[data-view="analyze"]');
+    await app.screenshot({ path: path.join(shots, 'analyze.png') });
+    await oapp.bringToFront();
+    await oapp.screenshot({ path: path.join(shots, 'order.png') });
+  } catch (e) {
+    console.log('  (screenshots skipped:', e.message.split('\n')[0] + ')');
+  }
 }
 
 await browser.close();

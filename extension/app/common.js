@@ -23,15 +23,30 @@ export function toast(msg, ms = 2600) {
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
+const RETRYABLE = new Set(['enqueue', 'retry', 'cancel', 'clear', 'snapshot']);
+
+/**
+ * Sends a command to the service worker. Chrome may stop the worker while it
+ * handles a request, leaving it unanswered; idempotent commands are then sent
+ * once more (enqueue carries a request id so it is never applied twice).
+ */
 export async function command(type, payload = {}) {
-  const res = await chrome.runtime.sendMessage({ type, ...payload });
-  if (!res?.ok) throw new Error(res?.error || '알 수 없는 오류');
-  return res;
+  const msg = { type, ...payload };
+  if (type === 'enqueue') msg.requestId = crypto.randomUUID();
+  const attempts = RETRYABLE.has(type) ? 2 : 1;
+  for (let i = 1; ; i++) {
+    const res = await Promise.race([
+      chrome.runtime.sendMessage(msg).catch((e) => ({ ok: false, error: e.message, lost: true })),
+      new Promise((r) => setTimeout(() => r({ ok: false, error: '확장 프로그램 응답 없음', lost: true }), 8000)),
+    ]);
+    if (res?.ok) return res;
+    if (!res?.lost || i >= attempts) throw new Error(res?.error || '알 수 없는 오류');
+  }
 }
 
 /** Saves a text file via the service worker, which names every download this extension makes. */
-export async function saveTextFile(filename, text) {
-  await command('saveText', { filename, text });
+export async function saveTextFile(filename, text, { bom = true } = {}) {
+  await command('saveText', { filename, text, bom });
 }
 
 export function timestamp() {
@@ -40,7 +55,7 @@ export function timestamp() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-export const STATUS_LABEL = { queued: '대기', starting: '시작 중', in_progress: '진행 중', complete: '완료', failed: '실패', cancelled: '취소' };
+export const STATUS_LABEL = { pending: '대기', downloading: '진행 중', success: '완료', failed: '실패', cancelled: '취소' };
 
 export function rafThrottle(fn) {
   let scheduled = false;

@@ -1,217 +1,358 @@
-import { $, command, h, rafThrottle, saveTextFile, STATUS_LABEL, timestamp, toast } from './common.js';
-import { badges, dimsText, displayName } from './item-format.js';
-import { createViewer } from './viewer.js';
+import { $, command, h, rafThrottle, toast } from './common.js';
+import { badges, dimsText, displayName, extText, sizeText } from './item-format.js';
 import { initPasteView } from './paste-view.js';
-import { collectImages, autoScroll } from '../content/collector.js';
-import { createProber, decodeWithImage, measureFullSize } from '../lib/probe.js';
-import { resolveEntry, mergeItem, buildCandidates } from '../lib/resolver.js';
-import { ALL_FORMATS, applyFilters, formatBytes, formatKey, SORT_LABELS, sortItems } from '../lib/filters.js';
-import { buildFolder } from '../lib/filename.js';
-import { hostOf } from '../lib/url-utils.js';
+import { initDownloadsView } from './downloads-view.js';
+import { createPdf, savePdf } from './pdf-export.js';
+import { collectImages, autoScroll, readImageInPage } from '../content/collector.js';
+import { createProber, decodeWithImage, hostAccessPolicy, measureFullSize, setCredentialPolicy } from '../lib/probe.js';
+import { resolveEntry, selectCandidate, ORIGINAL_STATE, SOURCE_LABEL } from '../lib/resolver.js';
+import { ALL_FORMATS, ALL_STATES, LIMITS, applyFilters, parseLimit } from '../lib/filters.js';
+import { buildFolder, fallbackBaseName, sanitizeFilename } from '../lib/filename.js';
+import { urlBasename, urlKey } from '../lib/url-utils.js';
+import { dedupeInOrder, mergeOrder } from '../lib/ordering.js';
 import { loadSettings, saveSettings } from '../lib/settings.js';
 
 let settings = await loadSettings();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.settings) settings = { ...settings, ...changes.settings.newValue };
+});
+setCredentialPolicy(hostAccessPolicy());
 const probe = createProber({ decode: decodeWithImage, concurrency: 8 });
+const params = new URLSearchParams(location.search);
 
 // ---------------------------------------------------------------- state
+// Items are keyed by a stable per-element id from the page, so URL changes,
+// rescans and filters never move or reset them. `order` is the page order.
 const state = {
-  tabId: Number(new URLSearchParams(location.search).get('tabId')) || null,
+  tabId: Number(params.get('tabId')) || null,
+  docId: null,
   page: null, // { url, title }
-  items: new Map(), // originalKey -> item
-  pending: 0,
-  resolved: 0,
-  seenEntries: new Set(),
-  nextOrder: 0,
+  items: new Map(),
+  order: [],
   selected: new Set(),
   scanning: false,
   scanGen: 0,
+  scrolledOnce: false,
+  jobsByItem: new Map(),
+  focusId: null,
 };
 const cards = new Map();
 
 // ---------------------------------------------------------------- views
 for (const tab of document.querySelectorAll('.tab')) {
   tab.addEventListener('click', () => {
-    if ($('#viewer') && !$('#viewer').hidden) return;
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
     document.querySelectorAll('.view').forEach((v) => (v.hidden = v.id !== `view-${tab.dataset.view}`));
   });
 }
-const showView = (name) => document.querySelector(`.tab[data-view="${name}"]`).click();
+const showView = (name) => document.querySelector(`.tab[data-view="${name}"]`)?.click();
+$('#openOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
 // ---------------------------------------------------------------- filters UI
-const filterState = { formats: new Set(ALL_FORMATS) };
-$('#fFormats').append(
-  ...ALL_FORMATS.map((f) =>
-    h('button', {
-      class: 'chip on',
-      dataset: { f },
-      onclick: (e) => {
-        filterState.formats.has(f) ? filterState.formats.delete(f) : filterState.formats.add(f);
-        e.target.classList.toggle('on', filterState.formats.has(f));
-        render();
-      },
-    }, f === 'OTHER' ? '기타' : f),
-  ),
-);
-$('#sortKey').append(...Object.entries(SORT_LABELS).map(([k, v]) => h('option', { value: k }, v)));
-for (const id of ['fMinW', 'fMinH', 'fMinSize', 'fSizeUnit', 'fUnknownSize', 'fNoThumb', 'fUnsure', 'sortKey']) {
-  $('#' + id).addEventListener('input', () => render());
-}
-$('#sortDir').addEventListener('click', (e) => {
-  const b = e.currentTarget;
-  b.dataset.dir = b.dataset.dir === 'asc' ? 'desc' : 'asc';
-  b.textContent = b.dataset.dir === 'asc' ? '오름차순 ↑' : '내림차순 ↓';
-  render();
-});
+const chipSet = (container, values, label) => {
+  const on = new Set(values);
+  container.append(
+    ...values.map((v) =>
+      h('button', {
+        class: 'chip on',
+        type: 'button',
+        'aria-pressed': 'true',
+        onclick: (e) => {
+          on.has(v) ? on.delete(v) : on.add(v);
+          e.currentTarget.classList.toggle('on', on.has(v));
+          e.currentTarget.setAttribute('aria-pressed', String(on.has(v)));
+          render();
+        },
+      }, label(v)),
+    ),
+  );
+  return on;
+};
+const formatOn = chipSet($('#fFormats'), ALL_FORMATS, (f) => (f === 'OTHER' ? '기타' : f === 'JPEG' ? 'JPG' : f));
+const stateOn = chipSet($('#fStates'), ALL_STATES, (s) => ORIGINAL_STATE[s]);
+for (const id of ['fMinW', 'fMinH', 'fMinSize', 'fSizeUnit', 'fUnknownSize', 'fNoThumb']) $('#' + id).addEventListener('input', () => render());
 
 function currentFilters() {
-  const num = (id) => Math.max(0, Number($('#' + id).value) || 0);
-  return {
-    minWidth: num('fMinW'),
-    minHeight: num('fMinH'),
-    minBytes: num('fMinSize') * Number($('#fSizeUnit').value),
-    includeUnknownSize: $('#fUnknownSize').checked,
-    formats: filterState.formats.size === ALL_FORMATS.length ? null : [...filterState.formats],
-    excludeThumbnails: $('#fNoThumb').checked,
-    onlyUnsure: $('#fUnsure').checked,
+  const errors = [];
+  const read = (id, max, label) => {
+    const r = parseLimit($('#' + id).value, max);
+    $('#' + id).classList.toggle('invalid', !!r.error);
+    if (r.error) errors.push(`${label}: ${r.error}`);
+    return r.value;
   };
+  const unit = Number($('#fSizeUnit').value);
+  const f = {
+    minWidth: read('fMinW', LIMITS.px, '최소 너비'),
+    minHeight: read('fMinH', LIMITS.px, '최소 높이'),
+    minBytes: read('fMinSize', Math.floor(LIMITS.bytes / unit), '최소 파일 크기') * unit,
+    unknownSize: $('#fUnknownSize').value,
+    formats: formatOn.size === ALL_FORMATS.length ? null : [...formatOn],
+    states: stateOn.size === ALL_STATES.length ? null : [...stateOn],
+    excludeThumbnails: $('#fNoThumb').checked,
+  };
+  $('#filterError').textContent = errors.join(' · ');
+  return f;
 }
 
-/** The list as currently filtered and sorted: shared by the grid and the viewer. */
-function visibleList() {
-  const all = [...state.items.values()];
-  const { items, hiddenUnknownSize } = applyFilters(all, currentFilters());
-  const sorted = sortItems(items, $('#sortKey').value, $('#sortDir').dataset.dir);
-  return { list: sorted, total: all.length, hiddenUnknownSize };
+// ---------------------------------------------------------------- preview size
+function setPreviewSize(size, save = true) {
+  const grid = $('#grid');
+  grid.classList.remove('size-small', 'size-medium', 'size-large');
+  grid.classList.add(`size-${size}`);
+  for (const b of document.querySelectorAll('.segmented button')) b.setAttribute('aria-checked', String(b.dataset.size === size));
+  if (save) saveSettings({ previewSize: size });
+  // Keep the item the user was on in view; nothing else changes.
+  if (state.focusId) cards.get(state.focusId)?.el.scrollIntoView({ block: 'nearest' });
+}
+for (const b of document.querySelectorAll('.segmented button')) b.addEventListener('click', () => setPreviewSize(b.dataset.size));
+setPreviewSize(settings.previewSize || 'medium', false);
+
+// ---------------------------------------------------------------- view model
+/**
+ * Page order → URL de-duplication (first occurrence wins) → display filter.
+ * Filtering keeps relative order and never touches the data or selection.
+ */
+function computeView() {
+  const ordered = state.order.map((id) => state.items.get(id)).filter(Boolean);
+  const { unique, duplicates } = dedupeInOrder(ordered, (it) => (it.urlError ? null : urlKey(it.originalUrl || it.displayUrl)));
+  unique.forEach((it, i) => (it.seq = i + 1));
+  const { items: visible, hiddenUnknownSize } = applyFilters(unique, currentFilters());
+  return { unique, visible, duplicates, hiddenUnknownSize };
 }
 
-// ---------------------------------------------------------------- grid
+// ---------------------------------------------------------------- cards
+function candidateLabel(c) {
+  const size = c.ok ? (c.width ? `${c.width}×${c.height}` : '해상도 확인 불가') : `실패: ${c.error || '접근 불가'}`;
+  return `${size} · ${SOURCE_LABEL[c.kind] || c.kind} · ${c.url.startsWith('data:') ? 'data URL' : urlBasename(c.url) || c.url}`;
+}
+
 function cardFor(item) {
   let c = cards.get(item.id);
   if (!c) {
-    const pick = h('input', { type: 'checkbox', class: 'pick', title: '선택' });
-    const img = h('img', { loading: 'lazy', alt: '', referrerPolicy: 'no-referrer-when-downgrade' });
-    const thumb = h('div', { class: 'thumb', title: '클릭하면 원본 순차 보기' }, img);
+    const pick = h('input', { type: 'checkbox', class: 'pick', 'aria-label': '선택' });
+    const seq = h('span', { class: 'seq' });
+    const img = h('img', { loading: 'lazy', alt: '', decoding: 'async' });
+    const noprev = h('span', { class: 'noprev', hidden: true }, '미리보기 없음');
+    const thumb = h('div', { class: 'thumb', title: '클릭하여 선택 / 해제' }, img, noprev);
     const dims = h('div', { class: 'dims' });
+    const sub = h('div', { class: 'sub' });
     const badgeBox = h('div', { class: 'badges' });
+    const cand = h('select', { class: 'cand', hidden: true, title: '다운로드할 원본 후보 선택' });
     const name = h('div', { class: 'name' });
-    const el = h('div', { class: 'card' }, pick, thumb, h('div', { class: 'meta' }, dims, badgeBox, name));
-    pick.addEventListener('click', (e) => onPick(item.id, e));
-    thumb.addEventListener('click', () => viewer.open(item.id));
+    const el = h('div', { class: 'card', tabindex: '-1', role: 'option', dataset: { id: item.id } }, pick, seq, thumb, h('div', { class: 'meta' }, dims, sub, badgeBox, cand, name));
+    pick.addEventListener('click', (e) => onPick(item.id, e.target.checked, e.shiftKey));
+    thumb.addEventListener('click', (e) => {
+      if (item.urlError) return;
+      onPick(item.id, !state.selected.has(item.id), e.shiftKey);
+    });
+    el.addEventListener('focus', () => (state.focusId = item.id));
     img.addEventListener('error', () => {
-      // The page's small version failed (e.g. expired); fall back to the original.
+      // A broken preview never blocks the rest of the card.
+      img.hidden = true;
+      noprev.hidden = false;
+    });
+    cand.addEventListener('change', () => {
       const it = state.items.get(item.id);
-      if (it && img.src !== it.originalUrl) img.src = it.originalUrl;
-    }, { once: true });
-    c = { el, pick, img, dims, badgeBox, name, sig: '' };
+      const upd = selectCandidate(it, cand.value);
+      if (upd) Object.assign(it, upd);
+      render();
+    });
+    c = { el, pick, seq, img, noprev, dims, sub, badgeBox, cand, name, sig: '' };
     cards.set(item.id, c);
   }
-  const sig = [item.width, item.height, item.format, item.bytes, item.confidenceLabel, item.originalStatus, item.isThumbnail, item.sourceType, item.originalUrl].join('|');
+  const job = state.jobsByItem.get(item.id);
+  const sig = [item.seq, item.pending, item.width, item.height, item.format, item.formatVerified, item.bytes, item.originalState, item.isThumbnail, item.sourceType, item.originalUrl, item.userChosen, item.inPage, job?.status, job?.error].join('|');
   if (sig !== c.sig) {
     c.sig = sig;
-    const preview = item.displayUrl && !item.displayUrl.startsWith('data:') ? item.displayUrl : item.originalUrl;
-    if (c.img.getAttribute('src') !== preview) c.img.src = preview;
+    c.seq.textContent = `#${item.seq}`;
+    c.el.classList.toggle('broken', !!item.urlError);
+    c.el.classList.toggle('pending', !!item.pending);
+    c.pick.disabled = !!item.urlError;
+    if (item.urlError) {
+      c.img.hidden = true;
+      c.noprev.hidden = false;
+      c.noprev.textContent = item.urlError;
+    } else {
+      const preview = item.displayUrl && !item.displayUrl.startsWith('data:') ? item.displayUrl : item.originalUrl;
+      if (c.img.getAttribute('src') !== preview) {
+        c.img.hidden = false;
+        c.noprev.hidden = true;
+        c.img.src = preview;
+      }
+    }
     c.dims.textContent = dimsText(item);
-    c.badgeBox.replaceChildren(...badges(item));
-    c.name.textContent = displayName(item);
-    c.name.title = item.originalUrl;
+    c.sub.textContent = item.urlError ? `발견 위치: ${item.elementType}` : `${extText(item)} · ${sizeText(item)}`;
+    c.badgeBox.replaceChildren(...badges(item, job));
+    const verified = (item.candidates || []).filter((x) => x.ok);
+    c.cand.hidden = item.pending || verified.length < 2;
+    if (!c.cand.hidden) {
+      c.cand.replaceChildren(...item.candidates.map((x) => h('option', { value: x.url, selected: x.url === item.originalUrl, disabled: !x.ok }, candidateLabel(x))));
+    }
+    const link = item.urlError || item.originalUrl.startsWith('data:') ? h('span', {}, displayName(item)) : h('a', { href: item.originalUrl, target: '_blank', rel: 'noreferrer', title: item.originalUrl }, displayName(item) + ' ↗');
+    c.name.replaceChildren(link);
   }
   const sel = state.selected.has(item.id);
   c.pick.checked = sel;
   c.el.classList.toggle('selected', sel);
+  c.el.setAttribute('aria-selected', String(sel));
   return c.el;
 }
 
-let lastPicked = null;
-let lastList = [];
-function onPick(id, e) {
-  const on = e.target.checked;
-  if (e.shiftKey && lastPicked) {
-    // Shift-click selects/deselects the whole range in the current order.
-    const a = lastList.findIndex((x) => x.id === lastPicked);
-    const b = lastList.findIndex((x) => x.id === id);
+let lastVisible = [];
+let lastIds = '';
+let anchorId = null;
+function onPick(id, on, shift) {
+  if (shift && anchorId) {
+    // Shift selects/deselects the whole range in the current list order.
+    const a = lastVisible.findIndex((x) => x.id === anchorId);
+    const b = lastVisible.findIndex((x) => x.id === id);
     if (a >= 0 && b >= 0) {
-      for (const it of lastList.slice(Math.min(a, b), Math.max(a, b) + 1)) on ? state.selected.add(it.id) : state.selected.delete(it.id);
+      for (const it of lastVisible.slice(Math.min(a, b), Math.max(a, b) + 1)) {
+        if (!it.urlError) on ? state.selected.add(it.id) : state.selected.delete(it.id);
+      }
     }
   } else {
     on ? state.selected.add(id) : state.selected.delete(id);
   }
-  lastPicked = id;
+  anchorId = id;
   render();
 }
 
 const render = rafThrottle(() => {
-  const { list, total, hiddenUnknownSize } = visibleList();
-  lastList = list;
-  $('#grid').replaceChildren(...list.map(cardFor));
+  const { unique, visible, duplicates, hiddenUnknownSize } = computeView();
+  lastVisible = visible;
+  for (const it of visible) cardFor(it);
+  const ids = visible.map((x) => x.id).join('\n');
+  if (ids !== lastIds) {
+    $('#grid').replaceChildren(...visible.map((it) => cards.get(it.id).el));
+    lastIds = ids;
+  }
+  const uniqueIds = new Set(unique.map((x) => x.id));
+  for (const id of [...state.selected]) {
+    if (uniqueIds.has(id)) continue;
+    // The item turned out to be a duplicate: keep the selection on the first occurrence.
+    state.selected.delete(id);
+    if (duplicates.has(id)) state.selected.add(duplicates.get(id));
+  }
+  const visibleIds = new Set(visible.map((x) => x.id));
   const selected = state.selected.size;
-  const visibleIds = new Set(list.map((x) => x.id));
   const hiddenSelected = [...state.selected].filter((id) => !visibleIds.has(id)).length;
   $('#countLine').replaceChildren(
-    `표시 ${list.length} / 전체 ${total} · 선택 ${selected}`,
+    `추출 ${unique.length}개 · 표시 ${visible.length}개 · 선택 ${selected}개`,
     h('small', {}, [
-      hiddenSelected ? ` (필터로 숨겨진 선택 ${hiddenSelected}개 포함)` : '',
-      hiddenUnknownSize ? ` · 크기 미확인 ${hiddenUnknownSize}개 제외됨` : '',
+      hiddenSelected ? ` (필터로 숨겨진 선택 ${hiddenSelected}개 유지)` : '',
+      duplicates.size ? ` · 같은 URL ${duplicates.size}개는 첫 항목으로 합침` : '',
+      hiddenUnknownSize ? ` · 크기 확인 불가 ${hiddenUnknownSize}개 숨김` : '',
     ].join('')),
   );
   $('#btnDownload').textContent = `선택 다운로드 (${selected})`;
   $('#btnDownload').disabled = !selected;
+  $('#btnPdf').textContent = `PDF로 저장 (${selected})`;
+  $('#btnPdf').disabled = !selected || pdfRunning;
   const empty = $('#emptyMsg');
-  empty.hidden = list.length > 0 || state.scanning;
-  empty.textContent = total ? '현재 필터에 맞는 이미지가 없습니다.' : state.tabId ? '찾은 이미지가 없습니다.' : '분석할 탭을 선택하세요.';
-  viewer.refresh();
+  empty.hidden = visible.length > 0 || state.scanning;
+  empty.textContent = unique.length ? '현재 필터에 맞는 이미지가 없습니다.' : state.tabId ? '찾은 이미지가 없습니다.' : '';
 });
 
-// ---------------------------------------------------------------- selection
-$('#btnSelectAll').addEventListener('click', () => { for (const id of state.items.keys()) state.selected.add(id); render(); });
-$('#btnSelectNone').addEventListener('click', () => { state.selected.clear(); render(); });
-$('#btnSelectFiltered').addEventListener('click', () => {
-  state.selected = new Set(visibleList().list.map((x) => x.id));
+// ---------------------------------------------------------------- keyboard navigation in the list
+$('#grid').addEventListener('keydown', (e) => {
+  const cardsEls = [...$('#grid').children];
+  if (!cardsEls.length) return;
+  let i = cardsEls.indexOf(document.activeElement.closest?.('.card'));
+  const cols = Math.max(1, cardsEls.filter((el) => el.offsetTop === cardsEls[0].offsetTop).length);
+  const moves = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols, Home: -Infinity, End: Infinity };
+  if (e.key in moves) {
+    e.preventDefault();
+    i = i < 0 ? 0 : Math.min(cardsEls.length - 1, Math.max(0, i + moves[e.key]));
+    cardsEls[i].focus();
+    cardsEls[i].scrollIntoView({ block: 'nearest' });
+  } else if ((e.key === ' ' || e.key === 'Spacebar') && i >= 0 && e.target === cardsEls[i]) {
+    e.preventDefault();
+    const id = cardsEls[i].dataset.id;
+    if (!state.items.get(id)?.urlError) onPick(id, !state.selected.has(id), e.shiftKey);
+  } else if (e.key === 'Enter' && i >= 0 && e.target === cardsEls[i]) {
+    const it = state.items.get(cardsEls[i].dataset.id);
+    if (it && !it.urlError && /^https?:/.test(it.originalUrl)) window.open(it.originalUrl, '_blank', 'noreferrer');
+  }
+});
+
+// ---------------------------------------------------------------- selection buttons
+$('#btnSelectAll').addEventListener('click', () => {
+  for (const it of computeView().unique) if (!it.urlError) state.selected.add(it.id);
+  render();
+});
+$('#btnSelectNone').addEventListener('click', () => {
+  state.selected.clear();
+  render();
+});
+$('#btnSelectVisible').addEventListener('click', () => {
+  state.selected = new Set(computeView().visible.filter((x) => !x.urlError).map((x) => x.id));
   render();
 });
 
 // ---------------------------------------------------------------- scanning
-async function populateTabs() {
-  const tabs = await chrome.tabs.query({});
-  const own = chrome.runtime.getURL('');
-  const usable = tabs.filter((t) => /^(https?|file):/.test(t.url || '') && !t.url.startsWith(own));
-  const sel = $('#tabSelect');
-  sel.replaceChildren(
-    h('option', { value: '' }, usable.length ? '— 탭을 선택하세요 —' : '분석할 수 있는 탭이 없습니다'),
-    ...usable.map((t) => h('option', { value: t.id, selected: t.id === state.tabId }, `${t.title || t.url} — ${hostOf(t.url)}`)),
-  );
+function setStatus(text) {
+  $('#scanStatus').textContent = text;
 }
 
-$('#tabSelect').addEventListener('change', (e) => {
-  state.tabId = Number(e.target.value) || null;
-  history.replaceState(null, '', state.tabId ? `?tabId=${state.tabId}` : '?');
-  resetResults();
-  if (state.tabId) scan();
-});
+function showPage() {
+  $('#pageTitle').textContent = state.page?.title || state.page?.url || '분석할 페이지가 없습니다';
+  $('#pageUrl').textContent = state.page?.url || (state.tabId ? '' : '웹페이지에서 Image Hunter 메뉴를 열고 "이 페이지의 이미지 찾기"를 누르세요.');
+  if (state.page) document.title = `Image Hunter — ${state.page.title || state.page.url}`;
+}
 
 function resetResults() {
   state.scanGen++;
   state.items.clear();
+  state.order = [];
   state.selected.clear();
-  state.seenEntries.clear();
-  state.nextOrder = 0;
-  state.pending = state.resolved = 0;
+  state.scrolledOnce = false;
   cards.clear();
-  render();
+  lastIds = '';
 }
 
-function setStatus(text) {
-  $('#scanStatus').textContent = text;
+const candSig = (e) => e.candidates.map((c) => c.url).join('|') + '|' + (e.urlError || '');
+
+function fromEntry(e) {
+  return {
+    entry: e,
+    candSig: candSig(e),
+    displayUrl: e.displayUrl,
+    elementType: e.elementType,
+    urlKind: e.urlKind,
+    urlError: e.urlError || null,
+    originalUrl: e.displayUrl,
+    sourcePageUrl: e.pageUrl,
+    pending: !e.urlError,
+  };
+}
+
+function accessError(e) {
+  const m = String(e?.message || e);
+  if (/Cannot access|cannot be scripted|permission|No tab with id|Frame with ID 0/i.test(m)) {
+    return '이 탭에 접근할 수 없습니다. 페이지가 이동·종료되었거나 Chrome이 접근을 허용하지 않는 페이지입니다. 분석할 페이지에서 Image Hunter 메뉴를 다시 열어 주세요.';
+  }
+  return `이미지를 찾지 못했습니다: ${m}`;
+}
+
+async function runCollector() {
+  try {
+    return await chrome.scripting.executeScript({ target: { tabId: state.tabId, allFrames: true }, func: collectImages, args: [{}] });
+  } catch {
+    // Some frames may be off-limits (other sites without permission): fall back to the page itself.
+    return chrome.scripting.executeScript({ target: { tabId: state.tabId }, func: collectImages, args: [{}] });
+  }
 }
 
 async function scan({ scroll = false } = {}) {
   if (!state.tabId || state.scanning) return;
   state.scanning = true;
-  const gen = state.scanGen;
+  let gen = state.scanGen;
   $('#btnScan').disabled = $('#btnScrollScan').disabled = true;
+  let scrollNote = '';
   try {
     if (scroll) {
-      setStatus('페이지를 끝까지 스크롤하며 지연 로딩 이미지를 불러오는 중…');
+      setStatus('페이지를 스크롤하며 지연 로딩 이미지를 불러오는 중…');
       // Background tabs don't render, so lazy loaders (IntersectionObserver) never fire.
       // Show the page while scrolling, then come back here.
       const me = await chrome.tabs.getCurrent();
@@ -219,39 +360,75 @@ async function scan({ scroll = false } = {}) {
       await chrome.tabs.update(state.tabId, { active: true });
       await chrome.windows.update(target.windowId, { focused: true }).catch(() => {});
       try {
-        await chrome.scripting.executeScript({ target: { tabId: state.tabId }, func: autoScroll, args: [{}] });
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId: state.tabId },
+          func: autoScroll,
+          args: [{ maxScreens: settings.scrollMaxScreens, resume: state.scrolledOnce }],
+        });
+        state.scrolledOnce = true;
+        scrollNote = result.reachedEnd ? ' · 페이지 끝까지 확인함' : ` · ${result.screens}화면까지 확인함 (더 있으면 다시 누르세요)`;
       } finally {
         await chrome.tabs.update(me.id, { active: true });
         await chrome.windows.update(me.windowId, { focused: true }).catch(() => {});
       }
     }
     setStatus('이미지를 찾는 중…');
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: state.tabId, allFrames: true },
-      func: collectImages,
-      args: [{}],
-    });
+    const results = await runCollector();
     if (gen !== state.scanGen) return;
-    results.sort((a, b) => (a.frameId === 0 ? -1 : b.frameId === 0 ? 1 : a.frameId - b.frameId));
     const main = results.find((r) => r.frameId === 0)?.result;
-    if (main) {
-      state.page = { url: main.pageUrl, title: main.title };
-      document.title = `Image Hunter — ${main.title || hostOf(main.pageUrl)}`;
+    if (!main) throw new Error('Cannot access the page');
+    let notice = '';
+    if (state.docId && main.docId !== state.docId) {
+      // Another document is loaded in that tab now: never mix two pages' lists.
+      resetResults();
+      gen = state.scanGen; // this scan now belongs to the new page
+      notice = '페이지가 바뀌어 목록을 새로 만들었습니다 (진행 중이거나 끝난 다운로드는 다운로드 탭에 그대로 있습니다). ';
     }
-    const fresh = [];
+    state.docId = main.docId;
+    state.page = { url: main.pageUrl, title: main.title };
+    showPage();
+
+    // Main frame first, then sub-frames in frame order.
+    results.sort((a, b) => (a.frameId === 0 ? -1 : b.frameId === 0 ? 1 : a.frameId - b.frameId));
+    const entries = [];
     for (const r of results) {
       if (!r.result) continue;
-      for (const e of r.result.entries) {
-        const key = e.candidates.map((c) => c.url).sort().join('|');
-        if (state.seenEntries.has(key)) continue;
-        state.seenEntries.add(key);
-        fresh.push({ ...e, order: state.nextOrder++, pageUrl: main?.pageUrl || r.result.pageUrl, frameUrl: r.result.pageUrl });
+      for (const e of r.result.entries) entries.push({ ...e, key: `${r.frameId}:${e.key}`, pageUrl: main.pageUrl, frameUrl: r.result.pageUrl });
+    }
+    const keys = entries.map((e) => e.key);
+    state.order = mergeOrder(state.order, keys);
+    const inScan = new Set(keys);
+    for (const it of state.items.values()) it.inPage = inScan.has(it.id);
+
+    const toResolve = [];
+    let added = 0;
+    let updated = 0;
+    for (const e of entries) {
+      let it = state.items.get(e.key);
+      if (!it) {
+        it = { id: e.key, inPage: true, originalState: 'unknown', candidates: [], ...fromEntry(e) };
+        state.items.set(e.key, it);
+        added++;
+        if (!it.urlError) toResolve.push(it);
+      } else if (candSig(e) !== it.candSig && !it.userChosen) {
+        // Same element, new URLs (e.g. a lazy image got its real source).
+        Object.assign(it, fromEntry(e));
+        updated++;
+        if (!it.urlError) toResolve.push(it);
       }
     }
-    await resolveEntries(fresh, gen);
+    render();
+    await resolveItems(toResolve, gen);
+    if (gen !== state.scanGen) return;
+    const { unique } = computeView();
+    const count = (s) => unique.filter((i) => i.originalState === s).length;
+    setStatus(
+      `${notice}이미지 ${unique.length}개 · 이번 검색에서 새로 발견 ${added}개, 갱신 ${updated}개 · ` +
+        `원본 후보 확인 ${count('confirmed')} · 고해상도 후보 ${count('hires')} · 후보 비교 필요 ${count('compare')} · 확인 불가 ${count('unknown')}` +
+        scrollNote,
+    );
   } catch (e) {
-    setStatus(`분석할 수 없는 페이지입니다: ${e.message || e}`);
-    return;
+    setStatus(accessError(e));
   } finally {
     state.scanning = false;
     $('#btnScan').disabled = $('#btnScrollScan').disabled = false;
@@ -259,45 +436,33 @@ async function scan({ scroll = false } = {}) {
   }
 }
 
-async function resolveEntries(entries, gen) {
-  if (!entries.length) {
-    setStatus(`새로 찾은 이미지가 없습니다. 현재 ${state.items.size}개.`);
-    return;
-  }
-  // Images and probes are requested by this tab: tell the worker which Referer to use.
-  if (settings.setReferer && state.page) {
-    const hosts = new Set();
-    for (const e of entries) for (const c of buildCandidates(e)) if (/^https?:/.test(c.url)) hosts.add(hostOf(c.url));
-    await command('setReferers', { scope: 'tab', pairs: [...hosts].map((host) => ({ host, referer: state.page.url })) }).catch(() => {});
-  }
-  state.pending += entries.length;
-  const opts = { thumbMaxSide: settings.thumbMaxSide, maxVariants: 6 };
-  const progress = () => setStatus(`원본 판별 중… ${state.resolved} / ${state.pending} (실제 해상도 확인)`);
+async function resolveItems(list, gen) {
+  if (!list.length) return;
+  let done = 0;
+  const opts = { thumbMaxSide: settings.thumbMaxSide, maxVariants: 6, guessVariants: settings.guessVariants };
+  const progress = () => setStatus(`원본 후보 확인 중… ${done} / ${list.length} (실제 해상도·형식 확인)`);
   progress();
   await Promise.all(
-    entries.map(async (entry) => {
-      const item = await resolveEntry(entry, probe, opts);
-      if (gen !== state.scanGen) return;
-      mergeItem(state.items, item);
-      state.resolved++;
+    list.map(async (it) => {
+      const sig = it.candSig;
+      const r = await resolveEntry(it.entry, probe, opts);
+      if (gen !== state.scanGen || it.candSig !== sig || it.userChosen) return;
+      const { order, ...fields } = r;
+      Object.assign(it, fields, { pending: false });
+      done++;
       progress();
       render();
     }),
   );
-  if (gen !== state.scanGen) return;
-  const all = [...state.items.values()];
-  const found = all.filter((i) => i.originalStatus === 'found').length;
-  const unsure = all.filter((i) => i.confidenceLabel === '확인 필요').length;
-  setStatus(`이미지 ${all.length}개 (페이지 항목 ${state.resolved}개에서 중복 제거) · 더 큰 원본 발견 ${found}개 · 확인 필요 ${unsure}개`);
 }
 
 $('#btnScan').addEventListener('click', () => scan());
 $('#btnScrollScan').addEventListener('click', () => scan({ scroll: true }));
 
-// ---------------------------------------------------------------- file size measuring
+// ---------------------------------------------------------------- file size check
 $('#btnMeasure').addEventListener('click', async () => {
-  const unknown = visibleList().list.filter((i) => i.bytes == null && !i.originalUrl.startsWith('data:'));
-  if (!unknown.length) return toast('크기를 측정할 항목이 없습니다.');
+  const unknown = computeView().visible.filter((i) => i.bytes == null && !i.urlError && !i.pending && /^https?:/.test(i.originalUrl));
+  if (!unknown.length) return toast('크기를 확인할 항목이 없습니다.');
   const btn = $('#btnMeasure');
   btn.disabled = true;
   let done = 0;
@@ -310,200 +475,140 @@ $('#btnMeasure').addEventListener('click', async () => {
       } catch {
         failed++;
       }
-      btn.textContent = `측정 중 ${++done}/${unknown.length}`;
+      btn.textContent = `확인 중 ${++done}/${unknown.length}`;
       render();
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
-  btn.textContent = '미확인 크기 측정';
+  btn.textContent = '크기 확인';
   btn.disabled = false;
-  toast(`크기 측정 완료: ${unknown.length - failed}개 성공${failed ? `, ${failed}개 실패` : ''}`);
+  toast(`크기 확인: ${unknown.length - failed}개 성공${failed ? `, ${failed}개는 사이트 권한이 없거나 응답이 없어 확인 불가` : ''}`, 4000);
 });
 
 // ---------------------------------------------------------------- downloading
-async function enqueue(list) {
-  return command('enqueue', { items: list, settings: { conflictAction: settings.conflictAction, concurrency: settings.concurrency } });
+async function enqueue(jobs) {
+  return command('enqueue', { jobs, settings: { conflictAction: settings.conflictAction, concurrency: settings.concurrency } });
 }
 
-async function downloadItems(items) {
-  if (!items.length) return toast('선택한 이미지가 없습니다.');
-  const site = state.page?.url || '';
-  await enqueue(
-    items.map((it) => ({
-      url: it.originalUrl,
-      referer: settings.setReferer ? site : '',
-      folder: buildFolder(settings, site),
-      format: it.format,
-      bytes: it.bytes,
-      group: 'page',
-    })),
-  );
-  toast(`${items.length}개 이미지를 다운로드 대기열에 추가했습니다.`);
+/** Selected items in page order (selection hidden by filters included). */
+function selectedInOrder() {
+  return computeView().unique.filter((it) => state.selected.has(it.id));
 }
 
-$('#btnDownload').addEventListener('click', () => {
-  // Keep the on-screen order so auto-generated names (image_001…) follow it.
-  const { list } = visibleList();
-  const visibleSel = list.filter((x) => state.selected.has(x.id));
-  const visibleIds = new Set(visibleSel.map((x) => x.id));
-  const hiddenSel = [...state.selected].filter((id) => !visibleIds.has(id)).map((id) => state.items.get(id)).filter(Boolean);
-  downloadItems([...visibleSel, ...sortItems(hiddenSel, 'order')]);
-});
-
-// ---------------------------------------------------------------- viewer
-const viewer = createViewer({
-  getList: () => visibleList().list,
-  isSelected: (id) => state.selected.has(id),
-  setSelected: (id, on) => {
-    on ? state.selected.add(id) : state.selected.delete(id);
-    render();
-  },
-  download: downloadItems,
-  getExcludeThumbs: () => $('#fNoThumb').checked,
-  setExcludeThumbs: (on) => {
-    $('#fNoThumb').checked = on;
-    render();
-  },
-  getAutoSkip: () => settings.autoSkipFailed,
-  setAutoSkip: async (on) => {
-    settings = await saveSettings({ autoSkipFailed: on });
-    $('#sAutoSkip').checked = on;
-  },
-  onLoaded: (item, w, hgt) => {
-    // The viewer decoded the full image: fill in a resolution we could not read before.
-    if (!item.width && w) {
-      Object.assign(item, { width: w, height: hgt });
-      render();
+async function downloadItems(list) {
+  const skipped = { pending: 0, done: 0 };
+  const jobs = [];
+  const retryIds = [];
+  for (const it of list) {
+    if (it.urlError) continue;
+    if (it.pending) {
+      skipped.pending++;
+      continue;
     }
-  },
-});
-$('#btnViewer').addEventListener('click', () => {
-  const { list } = visibleList();
-  const firstSel = list.find((x) => state.selected.has(x.id));
-  viewer.open((firstSel || list[0])?.id);
-});
-
-// ---------------------------------------------------------------- downloads view
-let downloads = [];
-const port = chrome.runtime.connect({ name: 'ih-downloads' });
-const dlRows = new Map();
-
-const pasteView = initPasteView({
-  getSettings: () => settings,
-  probe,
-  enqueue,
-  analyzeUrl: async (url) => {
-    const tab = await chrome.tabs.create({ url, active: false });
-    const listener = (id, info) => {
-      if (id === tab.id && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        chrome.tabs.create({ url: chrome.runtime.getURL(`app/app.html?tabId=${tab.id}`) });
+    const prev = state.jobsByItem.get(it.id);
+    if (prev && prev.url === it.originalUrl) {
+      if (['success', 'pending', 'downloading'].includes(prev.status)) {
+        skipped.done++;
+        continue;
       }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    toast('페이지를 연 뒤 새 분석 탭을 엽니다…');
+      // Failed/cancelled before: retry that job instead of adding a duplicate.
+      retryIds.push(prev.id);
+      continue;
+    }
+    jobs.push({
+      url: it.originalUrl,
+      sourceUrl: it.displayUrl,
+      source: 'page',
+      sourceTabId: state.tabId,
+      itemKey: it.id,
+      folder: buildFolder(settings, { pageTitle: state.page?.title, url: state.page?.url }),
+      fallbackBase: fallbackBaseName(state.page?.title, it.seq),
+      format: it.format,
+      formatVerified: it.formatVerified,
+      mime: it.mime,
+      serverName: it.serverName,
+      width: it.width,
+      height: it.height,
+      bytes: it.bytes,
+    });
+  }
+  if (jobs.length) await enqueue(jobs);
+  if (retryIds.length) await command('retry', { ids: retryIds });
+  const notes = [];
+  if (retryIds.length) notes.push(`실패·취소했던 ${retryIds.length}개 다시 시도`);
+  if (skipped.done) notes.push(`이미 받았거나 진행 중인 ${skipped.done}개 제외`);
+  if (skipped.pending) notes.push(`확인 중인 ${skipped.pending}개 제외`);
+  toast(`${jobs.length}개를 다운로드 대기열에 추가했습니다.${notes.length ? ' (' + notes.join(', ') + ')' : ''}`, 3500);
+}
+
+$('#btnDownload').addEventListener('click', () => downloadItems(selectedInOrder()));
+
+// ---------------------------------------------------------------- PDF
+let pdfRunning = false;
+let pdfAbort = null;
+$('#btnPdf').addEventListener('click', async () => {
+  const list = selectedInOrder().filter((it) => !it.urlError && !it.pending);
+  if (!list.length) return toast('PDF에 넣을 이미지를 선택하세요.');
+  pdfRunning = true;
+  pdfAbort = new AbortController();
+  render();
+  const panel = $('#pdfPanel');
+  panel.hidden = false;
+  $('#pdfSkipped').replaceChildren();
+  const title = state.page?.title || 'images';
+  try {
+    const result = await createPdf(
+      list.map((it) => ({ url: it.originalUrl, label: `#${it.seq}` })),
+      {
+        title,
+        pageSize: settings.pdfPageSize,
+        signal: pdfAbort.signal,
+        // Same-origin images can be read through the page itself (its own cookies, no CORS bypass).
+        readViaPage: state.tabId
+          ? async (url) => (await chrome.scripting.executeScript({ target: { tabId: state.tabId }, func: readImageInPage, args: [url] }))[0]?.result
+          : null,
+        onProgress: (i, n) => {
+          $('#pdfStatus').textContent = `PDF 만드는 중… ${i} / ${n}`;
+          $('#pdfBar').style.width = `${Math.round((i / n) * 100)}%`;
+        },
+      },
+    );
+    $('#pdfSkipped').replaceChildren(...result.skipped.map((s) => h('li', {}, `${s.label} 제외: ${s.reason}`)));
+    if (!result.blob) {
+      $('#pdfStatus').textContent = 'PDF를 만들지 못했습니다: 넣을 수 있는 이미지가 없습니다.';
+      return;
+    }
+    const filename = `${buildFolder(settings, { pageTitle: state.page?.title, url: state.page?.url })}/${sanitizeFilename(title) || 'images'}.pdf`;
+    await savePdf(result.blob, filename);
+    $('#pdfStatus').textContent = `PDF 저장: ${result.included}장 포함${result.skipped.length ? `, ${result.skipped.length}장 제외` : ''} → ${filename}`;
+  } catch (e) {
+    $('#pdfStatus').textContent = e?.name === 'AbortError' ? 'PDF 만들기를 취소했습니다.' : `PDF를 만들지 못했습니다: ${e?.message || e}`;
+  } finally {
+    pdfRunning = false;
+    render();
+  }
+});
+$('#pdfCancel').addEventListener('click', () => {
+  if (pdfRunning) pdfAbort?.abort();
+  else $('#pdfPanel').hidden = true;
+});
+
+// ---------------------------------------------------------------- other views
+const pasteView = initPasteView({ getSettings: () => settings, probe, enqueue });
+initDownloadsView({
+  getSettings: () => settings,
+  onJobs(jobs) {
+    // Latest job per page item, shown on its card.
+    const byItem = new Map();
+    for (const j of jobs) if (j.itemKey && (!byItem.has(j.itemKey) || byItem.get(j.itemKey).id < j.id)) byItem.set(j.itemKey, j);
+    state.jobsByItem = byItem;
+    pasteView.onJobs(jobs);
+    render();
   },
-});
-
-port.onMessage.addListener((msg) => {
-  if (msg.type !== 'downloads') return;
-  downloads = msg.items;
-  renderDownloads();
-  pasteView.onDownloads(downloads);
-});
-
-function renderDownloads() {
-  const counts = {};
-  for (const d of downloads) counts[d.status] = (counts[d.status] || 0) + 1;
-  const active = (counts.queued || 0) + (counts.starting || 0) + (counts.in_progress || 0);
-  const badge = $('#dlBadge');
-  badge.hidden = !active && !counts.failed;
-  badge.textContent = active || counts.failed || '';
-  badge.style.background = !active && counts.failed ? 'var(--bad)' : '';
-  $('#dlSummary').textContent = downloads.length
-    ? `전체 ${downloads.length} · ` + ['queued', 'in_progress', 'complete', 'failed', 'cancelled'].map((s) => `${STATUS_LABEL[s]} ${(s === 'in_progress' ? (counts.in_progress || 0) + (counts.starting || 0) : counts[s]) || 0}`).join(' · ')
-    : '';
-  $('#dlEmpty').hidden = downloads.length > 0;
-  $('#dlTable').hidden = !downloads.length;
-
-  const tbody = $('#dlTable tbody');
-  const live = new Set();
-  const rows = [...downloads].reverse().map((d) => {
-    live.add(d.id);
-    let r = dlRows.get(d.id);
-    if (!r) {
-      r = { tr: h('tr'), sig: '' };
-      dlRows.set(d.id, r);
-    }
-    const sig = [d.status, d.bytesReceived, d.totalBytes, d.filename, d.error].join('|');
-    if (sig !== r.sig) {
-      r.sig = sig;
-      r.tr.replaceChildren(...downloadCells(d));
-    }
-    return r.tr;
-  });
-  for (const id of dlRows.keys()) if (!live.has(id)) dlRows.delete(id);
-  tbody.replaceChildren(...rows);
-}
-
-function downloadCells(d) {
-  const name = d.filename ? d.filename.split('/').slice(1).join('/') : d.customName || '(파일명 결정 전)';
-  const pct = d.status === 'complete' ? 100 : d.totalBytes ? Math.min(100, Math.round((d.bytesReceived / d.totalBytes) * 100)) : 0;
-  const bytes = d.totalBytes ? `${formatBytes(d.bytesReceived)} / ${formatBytes(d.totalBytes)}` : d.bytesReceived ? formatBytes(d.bytesReceived) : '';
-  const actions = [];
-  if (d.status === 'failed' || d.status === 'cancelled') actions.push(h('button', { class: 'btn small', onclick: () => command('retry', { ids: [d.id] }) }, '재시도'));
-  if (['queued', 'starting', 'in_progress'].includes(d.status)) actions.push(h('button', { class: 'btn small', onclick: () => command('cancel', { ids: [d.id] }) }, '취소'));
-  return [
-    h('td', { class: 'url', title: `${d.url}\n→ ${d.savedPath || d.filename || ''}` }, h('div', {}, name), h('div', { class: 'pbytes' }, d.url.startsWith('data:') ? '(data URL)' : d.url)),
-    h('td', {}, h('span', { class: `st ${d.status}` }, STATUS_LABEL[d.status] || d.status)),
-    h('td', { class: 'c-progress' },
-      h('div', { class: `progress ${d.status === 'complete' ? 'done' : d.status === 'failed' ? 'failed' : ''}` }, h('div', { style: `width:${pct}%` })),
-      h('div', { class: 'pbytes' }, `${pct}%${bytes ? ' · ' + bytes : ''}`)),
-    h('td', { class: 'err' }, d.error || ''),
-    h('td', {}, ...actions),
-  ];
-}
-
-$('#dlRetryFailed').addEventListener('click', () => command('retry', {}));
-$('#dlCancelAll').addEventListener('click', () => command('cancel', {}));
-$('#dlClear').addEventListener('click', () => command('clear', { statuses: ['complete', 'cancelled'] }));
-$('#dlOpenFolder').addEventListener('click', () => chrome.downloads.showDefaultFolder());
-$('#dlExport').addEventListener('click', async () => {
-  const failed = downloads.filter((d) => d.status === 'failed');
-  if (!failed.length) return toast('실패한 다운로드가 없습니다.');
-  const text = failed.map((d) => `# ${d.error || '실패'}\n${d.url}`).join('\n') + '\n';
-  await navigator.clipboard.writeText(text).catch(() => {});
-  await saveTextFile(`${settings.rootFolder || 'Image Hunter'}/failed_urls_${timestamp()}.txt`, text);
-  toast(`실패 목록 ${failed.length}개를 저장하고 클립보드에 복사했습니다. URL 붙여넣기 화면에 그대로 붙여넣어 재시도할 수 있습니다.`, 4000);
-});
-
-// ---------------------------------------------------------------- settings view
-function fillSettings() {
-  $('#sRoot').value = settings.rootFolder;
-  $('#sPerSite').checked = settings.perSiteFolder;
-  $('#sConflict').value = settings.conflictAction;
-  $('#sConcurrency').value = settings.concurrency;
-  $('#sReferer').checked = settings.setReferer;
-  $('#sThumb').value = settings.thumbMaxSide;
-  $('#sAutoSkip').checked = settings.autoSkipFailed;
-}
-fillSettings();
-document.querySelector('#view-settings').addEventListener('change', async () => {
-  settings = await saveSettings({
-    rootFolder: $('#sRoot').value.trim() || 'Image Hunter',
-    perSiteFolder: $('#sPerSite').checked,
-    conflictAction: $('#sConflict').value,
-    concurrency: Math.min(8, Math.max(1, Number($('#sConcurrency').value) || 3)),
-    setReferer: $('#sReferer').checked,
-    thumbMaxSide: Math.max(16, Number($('#sThumb').value) || 300),
-    autoSkipFailed: $('#sAutoSkip').checked,
-  });
-  fillSettings();
-  $('#settingsSaved').textContent = '저장되었습니다. 썸네일 기준 변경은 다음 탐색부터 적용됩니다.';
 });
 
 // ---------------------------------------------------------------- start
-await populateTabs();
+showPage();
 render();
 if (state.tabId) scan();
-else if (new URLSearchParams(location.search).get('view') === 'paste') showView('paste');
+else if (params.get('view')) showView(params.get('view'));

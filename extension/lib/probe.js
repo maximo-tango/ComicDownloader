@@ -57,11 +57,7 @@ export async function readHead(url, fetchImpl, timeout = 20000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const resp = await fetchImpl(url, {
-      headers: { Range: `bytes=0-${HEAD_BYTES - 1}` },
-      credentials: 'include',
-      signal: ctrl.signal,
-    });
+    const resp = await fetchWithFallback(fetchImpl, url, { headers: { Range: `bytes=0-${HEAD_BYTES - 1}` }, signal: ctrl.signal });
     if (!resp.ok) return { ok: false, status: resp.status, error: httpError(resp.status) };
     const mime = resp.headers.get('content-type') || '';
     if (/^(text\/html|application\/(json|xhtml))/i.test(mime)) {
@@ -81,6 +77,7 @@ export async function readHead(url, fetchImpl, timeout = 20000) {
       finalUrl: resp.url,
       format: parsed?.format || formatFromMime(mime) || formatFromUrl(url),
       formatVerified: !!(parsed?.format || formatFromMime(mime)),
+      serverName: filenameFromDisposition(resp.headers.get('content-disposition')),
       width: parsed?.width || 0,
       height: parsed?.height || 0,
     };
@@ -92,9 +89,10 @@ export async function readHead(url, fetchImpl, timeout = 20000) {
 }
 
 function totalSize(resp) {
-  const range = resp.headers.get('content-range');
-  if (resp.status === 206 && range) {
-    const m = /\/(\d+)\s*$/.exec(range);
+  if (resp.status === 206) {
+    // Content-Length is only the partial length here; without a readable
+    // Content-Range (CORS may hide it) the total size stays unknown.
+    const m = /\/(\d+)\s*$/.exec(resp.headers.get('content-range') || '');
     return m ? Number(m[1]) : null;
   }
   // A compressed transfer length is not the file size.
@@ -159,7 +157,7 @@ export function httpError(status) {
 
 /** Downloads the whole body just to count bytes (for servers that send no length). */
 export async function measureFullSize(url, fetchImpl = globalThis.fetch) {
-  const resp = await fetchImpl(url, { credentials: 'include' });
+  const resp = await fetchWithFallback(fetchImpl, url, {});
   if (!resp.ok) throw new Error(httpError(resp.status));
   if (!resp.body?.getReader) return (await resp.arrayBuffer()).byteLength;
   const reader = resp.body.getReader();
@@ -190,4 +188,58 @@ export function decodeWithImage(url, timeout = 20000) {
     img.referrerPolicy = 'no-referrer-when-downgrade';
     img.src = url;
   });
+}
+
+/** File name from a Content-Disposition header ("" when absent or unreadable). */
+export function filenameFromDisposition(h) {
+  if (!h) return '';
+  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(h);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"|"$/g, ''));
+    } catch { /* fall through */ }
+  }
+  const m = /filename\s*=\s*"?([^";]+)"?/i.exec(h);
+  return m ? m[1].trim() : '';
+}
+
+/**
+ * Fetches with cookies first (login-only images on sites we may access), then
+ * without: servers answering "Access-Control-Allow-Origin: *" — common on
+ * CDNs — reject credentialed cross-origin requests.
+ */
+export async function fetchWithFallback(fetchImpl, url, init) {
+  if ((await credentialPolicy(url)) === 'omit') return fetchImpl(url, { ...init, credentials: 'omit' });
+  try {
+    return await fetchImpl(url, { ...init, credentials: 'include' });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw e;
+    return fetchImpl(url, { ...init, credentials: 'omit' });
+  }
+}
+
+// Decides per URL whether cookies are worth sending. Extension pages set this
+// to "only where we have host access": elsewhere CORS decides, and wildcard
+// CORS refuses credentialed requests anyway.
+let credentialPolicy = async () => 'include';
+export function setCredentialPolicy(fn) {
+  credentialPolicy = fn;
+}
+
+/** Policy for extension pages: cookies only for origins the extension may access. */
+export function hostAccessPolicy() {
+  const cache = new Map();
+  return (url) => {
+    let origin;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      return 'omit';
+    }
+    if (!/^https?:/.test(origin)) return 'include';
+    if (!cache.has(origin)) {
+      cache.set(origin, chrome.permissions.contains({ origins: [`${origin}/*`] }).then((ok) => (ok ? 'include' : 'omit'), () => 'include'));
+    }
+    return cache.get(origin);
+  };
 }

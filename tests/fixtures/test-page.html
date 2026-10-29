@@ -41,15 +41,31 @@
 
 <section><h2>9. 확장자 없는 URL (서버가 파일명 제공)</h2><img id="noext" src="/img/no-ext-image" style="width:320px" alt="noext"></section>
 
-<section><h2>10. Referer 필요 이미지</h2><img id="protected" src="/protected/secret.png" style="width:300px" alt="protected"></section>
+<section><h2>10. 외부 다운로드를 막는(핫링크 방지) 이미지</h2><img id="protected" src="/protected/secret.png" style="width:300px" alt="protected"></section>
 
 <section><h2>11. 중복 이미지</h2><img src="/img/dup.png" width="150"><img src="/img/dup.png" width="150"><img src="/img/dup.png#again" width="150"></section>
 
 <section><h2>12. 깨진 이미지</h2><img id="broken" src="/img/missing.png" alt="broken"></section>
 
+<section><h2>13. data-src 지연 로딩 (자리표시 이미지)</h2>
+  <img id="datasrc" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="/img/lazy-data-src.png" alt="data-src"></section>
+
+<section><h2>14. 사이트 고유 data-* 속성</h2>
+  <img id="datahd" src="/img/data-hd-thumb.png" data-hd="/img/hd/data-hd.png" data-tracking="https://example.invalid/page" data-note="hello" alt="data-hd"></section>
+
+<section><h2>15. 잘못된 URL / blob / javascript</h2>
+  <img id="badurl" src="http://[bad" alt="bad">
+  <img id="jsurl" src="javascript:alert(1)" alt="js">
+  <span id="blobslot"></span>
+  <script>
+    // An image whose only source is a page-scoped blob: URL.
+    const c = document.createElement('canvas'); c.width = c.height = 20;
+    c.toBlob((b) => { const i = document.createElement('img'); i.id = 'blobimg'; i.src = URL.createObjectURL(b); document.getElementById('blobslot').append(i); });
+  </script></section>
+
 <div class="spacer">아래로 스크롤하면 지연 로딩 이미지가 나타납니다</div>
 
-<section id="lazy"><h2>13. 스크롤 후 나타나는 이미지</h2></section>
+<section id="lazy"><h2>16. 스크롤 후 나타나는 이미지</h2></section>
 <script>
   // Images are only added to the DOM once the section scrolls into view.
   new IntersectionObserver((entries, obs) => {

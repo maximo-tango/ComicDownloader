@@ -62,27 +62,76 @@ export const IMAGES = {
   '/img/dup.png': [900, 900, 12],
   '/img/sizes/b-1x.png': [600, 400, 13],
   '/img/sizes/b-2x.png': [1200, 800, 13],
+  '/img/lazy-data-src.png': [1100, 700, 14],
+  '/img/hd/data-hd.png': [2000, 1500, 15],
+  '/img/data-hd-thumb.png': [200, 150, 15],
+  // ordering page: alphabetical names disagree with DOM order, C (mango) is the largest
+  '/order/zebra-400.png': [400, 300, 20],
+  '/order/zebra-1200.png': [1200, 900, 20],
+  '/order/bg-mid.png': [900, 300, 21],
+  '/order/apple.png': [600, 600, 22],
+  '/order/mango.png': [4000, 3000, 23],
+  '/order/kiwi.png': [700, 500, 24],
+  '/slow/big.png': [1400, 1000, 30],
 };
+
+// Pages and files registered by tests at runtime.
+const extraPages = new Map();
+const extraFiles = new Map();
+export function setPage(path, html) {
+  extraPages.set(path, html);
+}
+export function setFile(path, body, type) {
+  extraFiles.set(path, { body, type });
+}
+
+function imageSpec(pathname) {
+  if (IMAGES[pathname]) return IMAGES[pathname];
+  // /gen/<n>.png: many distinct small images for the performance page
+  const g = /^\/gen\/(\d+)\.png$/.exec(pathname);
+  if (g) {
+    const n = Number(g[1]);
+    return [120 + (n % 7) * 40, 90 + (n % 5) * 30, n];
+  }
+  return null;
+}
+
+function manyPage(n) {
+  const imgs = Array.from({ length: n }, (_, i) => `<img src="/gen/${i}.png" alt="${i}" width="80" height="60">`).join('\n');
+  return `<!doctype html><meta charset="utf-8"><title>많은 이미지 ${n}</title><h1>${n} images</h1>${imgs}`;
+}
 
 export function startServer(port = 8765) {
   const page = (name) => readFileSync(new URL(name, import.meta.url));
-  const server = createServer((req, res) => {
+  const html = (res, body) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(body);
+  };
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      return res.end(page('test-page.html'));
+    let path = url.pathname;
+    if (path === '/' || path === '/index.html') return html(res, page('test-page.html'));
+    if (path === '/order') return html(res, page('order-page.html'));
+    if (path === '/many') return html(res, manyPage(Math.min(5000, Number(url.searchParams.get('n')) || 1000)));
+    if (path === '/webtoon/1') return html(res, '<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');
+    if (extraPages.has(path)) return html(res, extraPages.get(path));
+    if (extraFiles.has(path)) {
+      const f = extraFiles.get(path);
+      res.writeHead(200, { 'content-type': f.type, 'content-length': f.body.length, 'access-control-allow-origin': '*' });
+      return res.end(f.body);
     }
-    if (url.pathname === '/webtoon/1') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      return res.end('<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');
-    }
-    const spec = IMAGES[url.pathname];
+
+    // /cors/... serves the same image with CORS headers (readable without host permission).
+    const cors = path.startsWith('/cors/');
+    if (cors) path = path.slice(5);
+    const spec = imageSpec(path);
     if (!spec) {
       res.writeHead(404, { 'content-type': 'text/plain' });
       return res.end('not found');
     }
-    // Hot-link protection: only serve with a Referer from this site.
-    if (url.pathname.startsWith('/protected/')) {
+    // Hot-link protection: only serve with a Referer from this site. Image Hunter must
+    // report this as a failure, not work around it.
+    if (path.startsWith('/protected/')) {
       const ref = req.headers.referer || '';
       if (!ref.startsWith(`http://${req.headers.host}/`)) {
         res.writeHead(403, { 'content-type': 'text/plain' });
@@ -91,7 +140,19 @@ export function startServer(port = 8765) {
     }
     const body = makePng(...spec);
     const headers = { 'content-type': 'image/png', 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
-    if (url.pathname === '/img/no-ext-image') headers['content-disposition'] = 'inline; filename="server-named.png"';
+    if (cors) Object.assign(headers, { 'access-control-allow-origin': '*', 'access-control-expose-headers': 'content-range' });
+    if (path === '/img/no-ext-image') headers['content-disposition'] = 'inline; filename="server-named.png"';
+    if (path.startsWith('/slow/')) {
+      // Trickles the file out over ~6 s so tests can cancel it or restart the worker mid-download.
+      res.writeHead(200, { ...headers, 'content-length': body.length });
+      const parts = 24;
+      const size = Math.ceil(body.length / parts);
+      for (let i = 0; i < parts && !res.destroyed; i++) {
+        res.write(body.subarray(i * size, (i + 1) * size));
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return res.end();
+    }
     const range = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
     if (range) {
       const start = Number(range[1]);

@@ -1,0 +1,11 @@
+:root { --ink: #1d2129; --muted: #687082; --line: #dfe2e8; --accent: #2f6fed; --bg: #fff; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --ink: #e6e8ed; --muted: #9aa1b0; --line: #2f343e; --accent: #5b8cff; --bg: #1e2128; color-scheme: dark; } }
+body { width: 280px; margin: 0; padding: 12px; font: 14px/1.4 "Segoe UI", "Malgun Gothic", system-ui, sans-serif; color: var(--ink); background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
+header { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+header img { width: 20px; height: 20px; }
+.page { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button { padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); cursor: pointer; text-align: left; font: inherit; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; text-align: center; }
+.note { margin: 0; font-size: 12px; color: var(--muted); }

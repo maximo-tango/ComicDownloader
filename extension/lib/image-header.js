@@ -33,8 +33,24 @@ export function parseImageHeader(bytes) {
 }
 
 function parseJpeg(b) {
+  const d = jpegDetails(b);
+  if (!d) return { format: 'JPEG' };
+  // EXIF orientations 5-8 rotate by 90°, which is how browsers display them.
+  return d.orientation >= 5 && d.orientation <= 8
+    ? { format: 'JPEG', width: d.height, height: d.width }
+    : { format: 'JPEG', width: d.width, height: d.height };
+}
+
+/**
+ * Stored (unrotated) size, colour components and EXIF orientation of a JPEG,
+ * or null when the frame header is not within the given bytes.
+ */
+export function jpegDetails(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (!(b[0] === 0xff && b[1] === 0xd8)) return null;
   let i = 2;
   let orientation = 1;
+  let adobe = false;
   while (i + 9 < b.length) {
     if (b[i] !== 0xff) { i++; continue; }
     const marker = b[i + 1];
@@ -44,18 +60,14 @@ function parseJpeg(b) {
     if (marker === 0xe1 && ascii(b, i + 4, 6) === 'Exif\0\0') {
       orientation = readExifOrientation(b, i + 10, Math.min(b.length, i + 2 + len)) || 1;
     }
+    if (marker === 0xee && ascii(b, i + 4, 5) === 'Adobe') adobe = true;
     const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
     if (isSof) {
-      const h = u16be(b, i + 5);
-      const w = u16be(b, i + 7);
-      // EXIF orientations 5-8 rotate by 90°, which is how browsers display them.
-      return orientation >= 5 && orientation <= 8
-        ? { format: 'JPEG', width: h, height: w }
-        : { format: 'JPEG', width: w, height: h };
+      return { height: u16be(b, i + 5), width: u16be(b, i + 7), components: b[i + 9], orientation, adobe, progressive: marker === 0xc2 };
     }
     i += 2 + len;
   }
-  return { format: 'JPEG' };
+  return null;
 }
 
 function readExifOrientation(b, start, end) {
