@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Image Hunter 테스트 페이지</title>
+<meta property="og:image" content="/img/plain-large.png">
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 20px auto; }
+  section { margin: 30px 0; }
+  .hero { height: 200px; background: url('/img/bg-hero.png') center / cover; }
+  img { max-width: 100%; }
+  .thumbs img { width: 200px; }
+  .spacer { height: 2500px; background: linear-gradient(#eee, #ccc); }
+</style>
+</head>
+<body>
+<h1>Image Hunter 테스트 페이지</h1>
+
+<section><h2>1. 일반 이미지 (축소 표시)</h2>
+  <img id="plain" src="/img/plain-large.png" style="width:600px" alt="plain"></section>
+
+<section><h2>2. srcset (w 서술자)</h2>
+  <img id="srcset" src="/img/sizes/a-480.png" sizes="300px"
+       srcset="/img/sizes/a-480.png 480w, /img/sizes/a-960.png 960w, /img/sizes/a-1920.png 1920w" alt="srcset"></section>
+
+<section><h2>3. srcset (x 서술자)</h2>
+  <img id="srcset-x" src="/img/sizes/b-1x.png" srcset="/img/sizes/b-2x.png 2x" style="width:300px" alt="x"></section>
+
+<section><h2>4. picture</h2>
+  <picture><source srcset="/img/pic-large.png 1600w" media="(min-width: 5000px)"><img id="pic" src="/img/pic-small.png" alt="pic"></picture></section>
+
+<section><h2>5. CSS 배경 이미지</h2><div class="hero"></div></section>
+
+<section class="thumbs"><h2>6. 썸네일 → 원본 링크</h2>
+  <a href="/img/gallery/full/cat.png"><img id="thumb-link" src="/img/gallery/t/cat.png" alt="cat"></a></section>
+
+<section class="thumbs"><h2>7. WordPress식 크기 접미사 (링크 없음)</h2>
+  <img id="wp" src="/uploads/photo-300x200.png" alt="wp"></section>
+
+<section><h2>8. 작은 아이콘 (원본 없음)</h2><img id="icon" src="/img/icon-thumb.png" alt="icon"></section>
+
+<section><h2>9. 확장자 없는 URL (서버가 파일명 제공)</h2><img id="noext" src="/img/no-ext-image" style="width:320px" alt="noext"></section>
+
+<section><h2>10. Referer 필요 이미지</h2><img id="protected" src="/protected/secret.png" style="width:300px" alt="protected"></section>
+
+<section><h2>11. 중복 이미지</h2><img src="/img/dup.png" width="150"><img src="/img/dup.png" width="150"><img src="/img/dup.png#again" width="150"></section>
+
+<section><h2>12. 깨진 이미지</h2><img id="broken" src="/img/missing.png" alt="broken"></section>
+
+<div class="spacer">아래로 스크롤하면 지연 로딩 이미지가 나타납니다</div>
+
+<section id="lazy"><h2>13. 스크롤 후 나타나는 이미지</h2></section>
+<script>
+  // Images are only added to the DOM once the section scrolls into view.
+  new IntersectionObserver((entries, obs) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    obs.disconnect();
+    for (const n of [1, 2]) {
+      const img = document.createElement('img');
+      img.src = `/img/lazy-${n}.png`;
+      img.style.width = '300px';
+      document.getElementById('lazy').append(img);
+    }
+  }).observe(document.getElementById('lazy'));
+</script>
+</body>
+</html>

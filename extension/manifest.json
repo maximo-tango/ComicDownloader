@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Image Hunter",
+  "version": "1.0.0",
+  "description": "웹페이지에서 썸네일이 아닌 원본 이미지를 찾아 순차 탐색하고 일괄 다운로드합니다.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "downloads", "storage", "tabs", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_title": "Image Hunter — 이 페이지의 원본 이미지 찾기",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+I" }, "description": "현재 페이지 분석" }
+  }
+}
