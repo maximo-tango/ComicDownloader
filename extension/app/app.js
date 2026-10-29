@@ -2,6 +2,7 @@ import { $, command, h, rafThrottle, toast } from './common.js';
 import { badges, dimsText, displayName, extText, sizeText } from './item-format.js';
 import { initPasteView } from './paste-view.js';
 import { initDownloadsView } from './downloads-view.js';
+import { initBatchView } from './batch-view.js';
 import { createPdf, savePdf } from './pdf-export.js';
 import { collectImages, autoScroll, readImageInPage } from '../content/collector.js';
 import { createProber, decodeWithImage, hostAccessPolicy, measureFullSize, setCredentialPolicy } from '../lib/probe.js';
@@ -72,6 +73,8 @@ const chipSet = (container, values, label, initial = values) => {
 const startFormats = Array.isArray(settings.filterFormats) && settings.filterFormats.length ? settings.filterFormats : ALL_FORMATS;
 const formatOn = chipSet($('#fFormats'), ALL_FORMATS, (f) => (f === 'OTHER' ? '기타' : f === 'JPEG' ? 'JPG' : f), startFormats);
 $('#fNoThumb').checked = !!settings.filterNoThumb;
+if (settings.filterMinWidth) $('#fMinW').value = settings.filterMinWidth;
+if (settings.filterMinHeight) $('#fMinH').value = settings.filterMinHeight;
 const stateOn = chipSet($('#fStates'), ALL_STATES, (s) => ORIGINAL_STATE[s]);
 for (const id of ['fMinW', 'fMinH', 'fMinSize', 'fSizeUnit', 'fUnknownSize', 'fNoThumb']) $('#' + id).addEventListener('input', () => render());
 
@@ -641,6 +644,7 @@ $('#pdfLayout').addEventListener('change', async (e) => {
 });
 
 // ---------------------------------------------------------------- other views
+initBatchView({ getSettings: () => settings });
 const pasteView = initPasteView({ getSettings: () => settings, probe, enqueue });
 initDownloadsView({
   getSettings: () => settings,
@@ -659,3 +663,7 @@ showPage();
 render();
 if (state.tabId) scan({ scroll: !!settings.scrollOnOpen });
 else if (params.get('view')) showView(params.get('view'));
+if (params.get('view') === 'batch' && params.get('url')) {
+  $('#bUrl').value = params.get('url');
+  $('#bUrl').dispatchEvent(new Event('input'));
+}

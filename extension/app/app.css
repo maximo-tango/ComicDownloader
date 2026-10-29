@@ -165,3 +165,6 @@ code { font-size: 12px; background: var(--chip); padding: 0 4px; border-radius: 
   .grid { --col: 150px; --thumb: 120px; }
   .grid.size-large { --col: 260px; --thumb: 240px; }
 }
+
+.status-line.error { color: var(--bad); }
+#view-batch .field input[type="url"] { min-width: 0; }

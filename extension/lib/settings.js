@@ -10,6 +10,8 @@ export const DEFAULT_SETTINGS = {
   // Starting state of the image list
   filterNoThumb: true, // "썸네일 의심 제외" checked
   filterFormats: ['JPEG'], // format chips switched on (empty/null = all)
+  filterMinWidth: 500, // px, 0 = no limit
+  filterMinHeight: 400,
   scrollOnOpen: true, // first search scrolls the page to load lazy images
   pdfLayout: 'continuous', // 'continuous' (images joined, no gaps) | 'page' (one image per page) | 'a4'
 };

@@ -88,12 +88,32 @@ export function setFile(path, body, type) {
 function imageSpec(pathname) {
   if (IMAGES[pathname]) return IMAGES[pathname];
   // /gen/<n>.png: many distinct small images for the performance page
+  // /ep/<episode>/<k>.png: strips of the episode series used by the batch test
+  const ep = /^\/ep\/(\d+)\/(\d)\.png$/.exec(pathname);
+  if (ep) return [690, 1000 - Number(ep[2]) * 50, Number(ep[1]) * 10 + Number(ep[2])];
+  if (pathname === '/ep/banner.png') return [300, 100, 99];
   const g = /^\/gen\/(\d+)\.png$/.exec(pathname);
   if (g) {
     const n = Number(g[1]);
     return [120 + (n % 7) * 40, 90 + (n % 5) * 30, n];
   }
   return null;
+}
+
+// Episodes 1-3 exist; later numbers are "not published yet" (no images).
+function episodePage(n) {
+  if (n < 1 || n > 3) return `<!doctype html><meta charset="utf-8"><title>없는 회차</title><p>아직 공개되지 않았습니다.</p>`;
+  return `<!doctype html><meta charset="utf-8"><title>에피소드 ${n}</title>
+<img src="/ep/banner.png" alt="banner">
+<img src="/ep/${n}/1.png" style="width:690px"><img src="/ep/${n}/2.png" style="width:690px">
+<div style="height:3000px"></div><div id="lazy"></div>
+<script>
+  new IntersectionObserver((e, o) => {
+    if (!e.some((x) => x.isIntersecting)) return;
+    o.disconnect();
+    const i = document.createElement('img'); i.src = '/ep/${n}/3.png'; document.getElementById('lazy').append(i);
+  }).observe(document.getElementById('lazy'));
+</script>`;
 }
 
 function manyPage(n) {
@@ -112,6 +132,7 @@ export function startServer(port = 8765) {
     let path = url.pathname;
     if (path === '/' || path === '/index.html') return html(res, page('test-page.html'));
     if (path === '/order') return html(res, page('order-page.html'));
+    if (path === '/ep') return html(res, episodePage(Number(url.searchParams.get('no')) || 0));
     if (path === '/many') return html(res, manyPage(Math.min(5000, Number(url.searchParams.get('n')) || 1000)));
     if (path === '/webtoon/1') return html(res, '<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');
     if (extraPages.has(path)) return html(res, extraPages.get(path));

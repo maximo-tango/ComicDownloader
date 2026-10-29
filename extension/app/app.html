@@ -12,6 +12,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-view="analyze" role="tab">페이지 이미지</button>
       <button class="tab" data-view="paste" role="tab">URL 직접 입력</button>
+      <button class="tab" data-view="batch" role="tab">연속 PDF</button>
       <button class="tab" data-view="downloads" role="tab">다운로드 <span id="dlBadge" class="count" hidden></span></button>
     </nav>
     <div class="spacer"></div>
@@ -107,6 +108,45 @@
       <div class="table-wrap">
         <table id="pasteTable" class="table" hidden>
           <thead><tr><th class="c-check"><input id="pasteCheckAll" type="checkbox" aria-label="모두 선택"></th><th>#</th><th>미리보기</th><th>URL</th><th>확인 결과</th><th>파일명</th><th>다운로드</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ 연속 PDF ============ -->
+    <section id="view-batch" class="view" hidden>
+      <div class="panel">
+        <label class="field grow"><span>주소</span><input id="bUrl" type="url" placeholder="회차 하나의 주소를 붙여넣으세요 (예: …detail?titleId=…&amp;no=116)"></label>
+        <label class="field"><span>바꿀 부분</span><select id="bParam"><option value="">주소를 먼저 입력하세요</option></select></label>
+        <label class="field"><span>시작</span><input id="bStart" type="number" min="0"></label>
+        <label class="field"><span>끝</span><input id="bEnd" type="number" min="0"></label>
+        <label class="field"><span>간격</span><input id="bStep" type="number" min="1" value="1"></label>
+        <div id="bPreview" class="status-line"></div>
+      </div>
+      <div class="panel">
+        <label class="field"><span>최소 너비</span><input id="bMinW" type="number" min="0" step="10"> px</label>
+        <label class="field"><span>최소 높이</span><input id="bMinH" type="number" min="0" step="10"> px</label>
+        <label class="check"><input id="bJpg" type="checkbox"> JPG만</label>
+        <label class="check"><input id="bNoThumb" type="checkbox"> 썸네일 의심 제외</label>
+        <label class="check"><input id="bScroll" type="checkbox"> 스크롤하며 추가 검색</label>
+        <label class="field"><span>PDF 구성</span><select id="bLayout"><option value="continuous">이어 붙이기</option><option value="page">이미지마다 한 쪽</option><option value="a4">A4</option></select></label>
+        <label class="field"><span>하위 폴더</span><input id="bFolder" type="text" placeholder="(선택)" maxlength="80"></label>
+        <label class="field" title="사이트에 부담을 주지 않도록 페이지 사이에 기다리는 시간"><span>페이지 사이 대기</span><input id="bDelay" type="number" min="0" max="60" value="2"> 초</label>
+        <div class="spacer"></div>
+        <button id="bRetry" class="btn small">실패·건너뜀 다시</button>
+        <button id="bStop" class="btn small" disabled>중지</button>
+        <button id="bRun" class="btn primary">시작</button>
+        <p class="hint" style="width:100%">각 페이지를 차례로 열어 스크롤로 이미지를 불러온 뒤, 조건에 맞는 이미지를 페이지 순서대로 PDF 한 개로 저장합니다(다운로드 폴더 → ImageHunter). 파일 이름은 페이지 제목입니다. 시작할 때 그 사이트 접근 허용을 묻습니다.</p>
+      </div>
+      <div id="bPermission" class="panel" hidden>
+        <div id="bPermissionText" class="grow"></div>
+        <button id="bGrant" class="btn primary small">접근 허용 후 계속</button>
+        <button id="bSkipGrant" class="btn small">허용하지 않고 계속</button>
+      </div>
+      <div id="bSummary" class="count-line"></div>
+      <div class="table-wrap">
+        <table id="bTable" class="table" hidden>
+          <thead><tr><th>번호</th><th>페이지</th><th>상태</th><th>이미지</th><th>PDF</th><th>메모</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>

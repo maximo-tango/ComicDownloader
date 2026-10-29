@@ -197,20 +197,6 @@ async function handle(msg) {
       changed();
       return {};
     }
-    case 'saveText': {
-      // Chrome renames data: downloads to match their MIME type, so it must fit the extension.
-      const ext = (msg.filename.split('.').pop() || '').toLowerCase();
-      const mime = { csv: 'text/csv', json: 'application/json' }[ext] || 'text/plain';
-      const url = `data:${mime};charset=utf-8,` + encodeURIComponent((msg.bom === false ? '' : '\ufeff') + msg.text);
-      await chrome.downloads.download({ url, filename: msg.filename, saveAs: false, conflictAction: 'uniquify' });
-      return {};
-    }
-    case 'saveUrl': {
-      // A blob: URL created by an extension page (e.g. a generated PDF).
-      if (!msg.url.startsWith(`blob:chrome-extension://${chrome.runtime.id}/`)) throw new Error('허용되지 않는 URL');
-      const downloadId = await chrome.downloads.download({ url: msg.url, filename: msg.filename, saveAs: false, conflictAction: 'uniquify' });
-      return { downloadId };
-    }
     case 'snapshot':
       return { jobs };
     default:

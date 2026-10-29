@@ -2,7 +2,6 @@
 // JPEGs are embedded unchanged; other formats are decoded and stored losslessly.
 // Images the extension is not allowed to read are skipped and reported.
 
-import { command } from './common.js';
 import { buildPdf } from '../lib/pdf.js';
 import { jpegDetails } from '../lib/image-header.js';
 import { fetchWithFallback } from '../lib/probe.js';
@@ -108,15 +107,19 @@ async function deflate(bytes) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-/** Saves a generated PDF under the given relative path (named by the service worker). */
+/**
+ * Saves a generated PDF under the given relative path. The page downloads its
+ * own blob directly: handing a page's blob: URL to the service worker to
+ * download could leave the worker unresponsive.
+ */
 export async function savePdf(blob, filename) {
   const url = URL.createObjectURL(blob);
-  let res;
+  let downloadId;
   try {
-    res = await command('saveUrl', { url, filename });
+    downloadId = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
   } catch (e) {
     URL.revokeObjectURL(url);
-    throw e;
+    throw new Error(`PDF를 저장하지 못했습니다: ${e?.message || e}`);
   }
   // The blob must stay alive until Chrome has written the file.
   const release = () => {
@@ -124,8 +127,9 @@ export async function savePdf(blob, filename) {
     URL.revokeObjectURL(url);
   };
   const onChanged = (d) => {
-    if (d.id === res.downloadId && d.state && d.state.current !== 'in_progress') release();
+    if (d.id === downloadId && d.state && d.state.current !== 'in_progress') release();
   };
   chrome.downloads.onChanged.addListener(onChanged);
   setTimeout(release, 10 * 60 * 1000);
+  return downloadId;
 }

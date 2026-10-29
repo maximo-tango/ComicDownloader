@@ -44,9 +44,13 @@ export async function command(type, payload = {}) {
   }
 }
 
-/** Saves a text file via the service worker, which names every download this extension makes. */
+/** Saves a text file (relative to the download folder) straight from the page. */
 export async function saveTextFile(filename, text, { bom = true } = {}) {
-  await command('saveText', { filename, text, bom });
+  // Chrome renames data: downloads to match their MIME type, so it must fit the extension.
+  const ext = (filename.split('.').pop() || '').toLowerCase();
+  const mime = { csv: 'text/csv', json: 'application/json' }[ext] || 'text/plain';
+  const url = `data:${mime};charset=utf-8,` + encodeURIComponent((bom ? '\ufeff' : '') + text);
+  await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
 }
 
 export function timestamp() {

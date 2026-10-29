@@ -33,6 +33,8 @@ form.addEventListener('change', async () => {
     scrollOnOpen: f.scrollOnOpen.checked,
     filterNoThumb: f.filterNoThumb.checked,
     filterFormats: f.jpgOnly.checked ? ['JPEG'] : null,
+    filterMinWidth: clamp(f.filterMinWidth.value, 0, 100000, 0),
+    filterMinHeight: clamp(f.filterMinHeight.value, 0, 100000, 0),
   });
   fill(s);
   document.querySelector('#saved').textContent = '저장되었습니다. 원본 판별 설정은 다음 검색부터 적용됩니다.';

@@ -64,8 +64,12 @@ let swTarget = await findWorker();
 const extId = new URL(swTarget.url()).host;
 // The steps below check every format and thumbnail; the shipped defaults
 // (JPG only, thumbnails hidden, scroll on open) get their own step at the end.
-const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false };
-await (await swTarget.worker()).evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
+const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false, filterMinWidth: 0, filterMinHeight: 0 };
+// Written from an extension page: right after start-up the worker may not have its APIs yet.
+const setupPage = await browser.newPage();
+await setupPage.goto(`chrome-extension://${extId}/options/options.html`);
+await setupPage.evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
+await setupPage.close();
 const consoleErrors = [];
 
 async function openSite(p) {
@@ -570,6 +574,34 @@ await step('[18] 이미지 1000장 페이지 성능', async () => {
   return `검색+판별 ${(tScan / 1000).toFixed(1)}초, 전체 선택·필터·크기 변경 ${tUi} ms`;
 });
 
+await step('연속 PDF: 주소의 번호를 바꿔 각 페이지를 열고 스크롤·필터 후 PDF로 저장', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.click('.tab[data-view="batch"]');
+  await app.$eval('#bUrl', (e, u) => { e.value = u; e.dispatchEvent(new Event('input')); }, `${SITE}/ep?series=7&no=1`);
+  assert.equal(await app.$eval('#bParam', (s) => s.value), 'q:no', 'episode-like parameter preselected');
+  await app.$eval('#bEnd', (e) => { e.value = '4'; e.dispatchEvent(new Event('input')); });
+  assert.match(await app.$eval('#bPreview', (e) => e.textContent), /^4개 주소: .*no=1 … .*no=4$/);
+  // fixtures are PNG; the requested size filter: width ≥ 500, height ≥ 400
+  await app.$eval('#bJpg', (e) => (e.checked = false));
+  await app.$eval('#bMinW', (e) => (e.value = '500'));
+  await app.$eval('#bMinH', (e) => (e.value = '400'));
+  await app.$eval('#bDelay', (e) => (e.value = '0'));
+  await app.$eval('#bFolder', (e) => (e.value = '연속'));
+  await app.click('#bRun');
+  await app.waitForFunction(() => /완료 3 · 건너뜀 1 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 });
+  const rows = await app.$$eval('#bTable tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
+  assert.deepEqual(rows.map((r) => [r[0], r[2], r[3]]), [['1', '완료', '3장 / 찾은 4장'], ['2', '완료', '3장 / 찾은 4장'], ['3', '완료', '3장 / 찾은 4장'], ['4', '건너뜀', '0장 / 찾은 0장']]);
+  const dir = path.join(downloadDir, 'ImageHunter', '연속');
+  await until(() => files(dir).length === 3, 20000, 'batch pdfs');
+  assert.deepEqual(files(dir), ['에피소드 1.pdf', '에피소드 2.pdf', '에피소드 3.pdf']);
+  const text = readFileSync(path.join(dir, '에피소드 2.pdf')).toString('latin1');
+  const imgs = [...text.matchAll(/\/Subtype \/Image \/Width (\d+) \/Height (\d+)/g)].map((m) => `${m[1]}x${m[2]}`);
+  assert.deepEqual(imgs, ['690x950', '690x900', '690x850'], 'strips in page order, scrolled-in strip included, banner filtered out');
+  assert.equal((text.match(/\/Type \/Page /g) || []).length, 1, 'joined without gaps');
+  const left = await (await swTarget.worker()).evaluate((u) => chrome.tabs.query({ url: u }).then((t) => t.length), `${SITE}/ep*`);
+  assert.equal(left, 0, 'opened tabs are closed again');
+});
+
 await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 스크롤', async () => {
   await (await swTarget.worker()).evaluate(() => chrome.storage.local.remove('settings'));
   const site2 = await openSite('/?defaults');
@@ -582,6 +614,10 @@ await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 �
   assert.equal(await dapp.$eval('#fNoThumb', (e) => e.checked), true);
   const on = await dapp.$$eval('#fFormats .chip.on', (l) => l.map((c) => c.textContent));
   assert.deepEqual(on, ['JPG']);
+  assert.deepEqual(await dapp.$$eval('#fMinW, #fMinH', (l) => l.map((i) => i.value)), ['500', '400']);
+  // the batch view starts from the same defaults
+  assert.deepEqual(await dapp.$$eval('#bMinW, #bMinH', (l) => l.map((i) => i.value)), ['500', '400']);
+  assert.equal(await dapp.$eval('#bJpg', (e) => e.checked), true);
   await dapp.close();
   await site2.page.close();
   await (await swTarget.worker()).evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
