@@ -119,6 +119,11 @@ const snapshot = (page) =>
     }),
   ]);
 const files = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => !f.endsWith('.crdownload')).sort() : []);
+// Downloads finish shortly after the page reports them started.
+const filesSoon = async (dir, n, ms = 10000) => {
+  for (const end = Date.now() + ms; files(dir).length < n && Date.now() < end; ) await new Promise((r) => setTimeout(r, 200));
+  return files(dir);
+};
 async function until(fn, timeout = 30000, label = 'condition') {
   const end = Date.now() + timeout;
   let last;
@@ -681,8 +686,32 @@ await step('연속 PDF: 목록 페이지에서 링크 추출 — 비슷한 링�
   await app.waitForFunction(() => !document.querySelector('#bRun').disabled && /확인 3 \/ 3 · 완료 2 · 없음 1 · 건너뜀 0 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 }).catch(async (e) => {
     throw new Error(`${e.message}\nsummary: ${await app.$eval('#bSummary', (x) => x.textContent)}`);
   });
-  assert.deepEqual(files(path.join(downloadDir, 'ImageHunter', '목록')), ['웹툰 1001.pdf', '웹툰 1009.pdf']);
+  assert.deepEqual(await filesSoon(path.join(downloadDir, 'ImageHunter', '목록'), 2), ['웹툰 1001.pdf', '웹툰 1009.pdf']);
   await app.click('input[name="bMode"][value="series"]');
+});
+
+await step('PDF 파일명: Chrome이 "Invalid filename"으로 거부하는 이름도 저장됨', async () => {
+  const titles = [
+    '리턴 투 플레이어 56화 56화. 숨겨진 폭탄 (2) | 뉴토끼',
+    '제목\u200b 1화\u200e | 사이트\ufeff',
+    '~작품~ 2화 ~',
+    '바로가기.lnk',
+    '\u3000 줄\u2028바꿈 \u00a0',
+  ];
+  const out = await ext(async (titles) => {
+    const { sanitizeFilename } = await import('/lib/filename.js');
+    const { savePdf } = await import('/app/pdf-export.js');
+    const results = [];
+    for (const t of titles) {
+      const raw = await chrome.downloads.download({ url: 'data:application/pdf;base64,JVBERi0xLjQK', filename: `ImageHunter/이름/${t}.pdf` }).then(() => 'ok', (e) => e.message);
+      const saved = await savePdf(new Blob(['%PDF-1.4\n'], { type: 'application/pdf' }), `ImageHunter/이름/${sanitizeFilename(t)}.pdf`).catch((e) => 'ERR ' + e.message);
+      results.push({ t, raw, saved });
+    }
+    return results;
+  }, titles);
+  console.log('      ' + out.map((r) => `${JSON.stringify(r.t)}: 그대로=${r.raw} → ${r.saved}`).join('\n      '));
+  for (const r of out) assert.doesNotMatch(r.saved, /^ERR/, r.t);
+  assert.equal(out[0].saved, 'ImageHunter/이름/리턴 투 플레이어 56화 56화. 숨겨진 폭탄 (2) _ 뉴토끼.pdf');
 });
 
 await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 스크롤', async () => {

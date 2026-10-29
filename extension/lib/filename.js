@@ -37,19 +37,38 @@ export function splitExt(name) {
 export function sanitizeSegment(s) {
   let out = String(s ?? '')
     .normalize('NFC')
-    .replace(/[\u0000-\u001f\u007f]/g, '')
+    // Chrome refuses names with control/format characters (zero-width space, BOM,
+    // direction marks …), unassigned code points, lone surrogates and line separators.
+    .replace(/[\p{Cc}\p{Cf}\p{Cn}\p{Cs}\p{Co}]/gu, '')
     .replace(/[<>:"/\\|?*]/g, '_')
-    .replace(/\s+/g, ' ')
+    .replace(/[\s\p{Zl}\p{Zp}]+/gu, ' ')
     .trim()
-    .replace(/^[.\s]+|[.\s]+$/g, '');
+    // ...and names that start or end with a dot, a space or "~".
+    .replace(/^[.\s~]+|[.\s~]+$/gu, '');
   if (WINDOWS_RESERVED.test(out.split('.')[0])) out = '_' + out;
+  // Extensions Windows treats as shortcuts/links are refused too.
+  if (/\.(lnk|local|url|scf)$/i.test(out) || /\.\{[^}]*\}$/.test(out)) out += '_';
   return out;
+}
+
+/**
+ * Last-resort version of a relative path ("folder/name.pdf") when Chrome still
+ * calls it invalid: keep only letters, digits, spaces and a few marks in each
+ * part. Empty parts are dropped; an empty name becomes `fallback`.
+ */
+export function strictPath(path, fallback) {
+  const parts = String(path).split('/');
+  const file = parts.pop();
+  const [base, ext] = splitExt(file);
+  const strict = (x) => sanitizeSegment(x.replace(/[^\p{L}\p{N} _\-()[\]]/gu, '_').replace(/_+/g, '_')).replace(/^_+|_+$/g, '').slice(0, 80);
+  const dirs = parts.map(strict).filter(Boolean);
+  return [...dirs, `${strict(base) || fallback}${ext ? `.${ext}` : ''}`].join('/');
 }
 
 export function sanitizeFilename(name) {
   const clean = sanitizeSegment(name);
   let [base, ext] = splitExt(clean);
-  if (base.length > MAX_BASE) base = base.slice(0, MAX_BASE).trim();
+  if (base.length > MAX_BASE) base = sanitizeSegment(base.slice(0, MAX_BASE)); // the cut may end in "." or "~"
   ext = ext.toLowerCase().slice(0, 5);
   return ext ? `${base}.${ext}` : base;
 }

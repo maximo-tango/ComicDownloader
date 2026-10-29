@@ -5,6 +5,7 @@
 import { buildPdf } from '../lib/pdf.js';
 import { jpegDetails } from '../lib/image-header.js';
 import { fetchWithFallback } from '../lib/probe.js';
+import { strictPath } from '../lib/filename.js';
 
 /**
  * @param sources      [{ url, label }] in the order the pages should appear
@@ -110,16 +111,26 @@ async function deflate(bytes) {
 /**
  * Saves a generated PDF under the given relative path. The page downloads its
  * own blob directly: handing a page's blob: URL to the service worker to
- * download could leave the worker unresponsive.
+ * download could leave the worker unresponsive. If Chrome calls the name
+ * invalid, it retries with a simplified name, then with an automatic one.
+ * @returns the relative path actually used
  */
 export async function savePdf(blob, filename) {
   const url = URL.createObjectURL(blob);
+  const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+  const names = [...new Set([filename, strictPath(filename, `pdf_${stamp}`), `ImageHunter/pdf_${stamp}.pdf`])];
   let downloadId;
-  try {
-    downloadId = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
-  } catch (e) {
-    URL.revokeObjectURL(url);
-    throw new Error(`PDF를 저장하지 못했습니다: ${e?.message || e}`);
+  let used;
+  for (const name of names) {
+    try {
+      downloadId = await chrome.downloads.download({ url, filename: name, saveAs: false, conflictAction: 'uniquify' });
+      used = name;
+      break;
+    } catch (e) {
+      if (/invalid filename/i.test(e?.message || '') && name !== names.at(-1)) continue;
+      URL.revokeObjectURL(url);
+      throw new Error(`PDF를 저장하지 못했습니다: ${e?.message || e}`);
+    }
   }
   // The blob must stay alive until Chrome has written the file.
   const release = () => {
@@ -131,5 +142,5 @@ export async function savePdf(blob, filename) {
   };
   chrome.downloads.onChanged.addListener(onChanged);
   setTimeout(release, 10 * 60 * 1000);
-  return downloadId;
+  return used;
 }

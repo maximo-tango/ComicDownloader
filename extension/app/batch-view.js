@@ -347,9 +347,9 @@ export function initBatchView({ getSettings }) {
       if (!pdf.blob) return set(r, { step: 'failed', error: pdf.skipped[0]?.reason || 'PDF에 넣을 수 있는 이미지가 없습니다' });
       const name = sanitizeFilename(a.title) || `page_${r.n}`;
       const file = `${buildFolder({ ...settings, folderMode: 'none', subFolder: $('#bFolder').value.trim() })}/${name}.pdf`;
-      await savePdf(pdf.blob, file);
+      const saved = await savePdf(pdf.blob, file);
       const missing = pdf.skipped.length;
-      set(r, { step: 'done', file, images: pdf.included, error: missing ? `${missing}장 제외: ${pdf.skipped[0].reason}` : '' });
+      set(r, { step: 'done', file: saved, images: pdf.included, error: missing ? `${missing}장 제외: ${pdf.skipped[0].reason}` : '' });
     } catch (e) {
       set(r, { step: 'failed', error: String(e?.message || e) });
     } finally {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildFolder, decideFilename, fallbackBaseName, isUsableName, NameRegistry, previewFilename, sanitizeFilename, siteFolderName, withImageExt } from '../extension/lib/filename.js';
+import { buildFolder, decideFilename, fallbackBaseName, isUsableName, NameRegistry, previewFilename, sanitizeFilename, sanitizeSegment, siteFolderName, strictPath, withImageExt } from '../extension/lib/filename.js';
 
 const name = (args) => decideFilename(args).name;
 
@@ -108,4 +108,19 @@ test('dots inside titles are not extensions', () => {
   const reg = new NameRegistry();
   const base = fallbackBaseName('괴력 난신 - 116화. 조태청(1) : 네이버 웹툰', 7);
   assert.equal(name({ serverName: '', mime: 'image/jpeg', fallbackBase: base, folder: 'F', registry: reg }), '괴력 난신 - 116화. 조태청(1) _ 네이버 웹툰_007.jpg');
+});
+
+test('characters Chrome calls an "Invalid filename" are removed', () => {
+  assert.equal(sanitizeSegment('제목​ 1화‎﻿'), '제목 1화', 'zero-width space, direction mark, BOM');
+  assert.equal(sanitizeSegment('~작품~ 1화 ~'), '작품~ 1화', '~ at either end');
+  assert.equal(sanitizeSegment('a b c'), 'a b c', 'line/paragraph separators');
+  assert.equal(sanitizeSegment('x\ud800y'), 'xy', 'lone surrogate');
+  assert.equal(sanitizeSegment('바로가기.lnk'), '바로가기.lnk_');
+  assert.equal(sanitizeSegment('　 제목  '), '제목', 'ideographic and no-break spaces');
+  assert.equal(sanitizeFilename('가'.repeat(99) + '.~~~ 끝'), '가'.repeat(99), 'cut at 100 never ends in "." or "~"');
+});
+
+test('strictPath: last-resort name keeps letters and digits only', () => {
+  assert.equal(strictPath('ImageHunter/목록/괴력 난신 - 116화. 조태청(1)!!.pdf', 'pdf_1'), 'ImageHunter/목록/괴력 난신 - 116화_ 조태청(1).pdf');
+  assert.equal(strictPath('ImageHunter/★☆★.pdf', 'pdf_1'), 'ImageHunter/pdf_1.pdf');
 });

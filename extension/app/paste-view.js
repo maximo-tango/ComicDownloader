@@ -227,10 +227,10 @@ export function initPasteView({ getSettings, probe, enqueue }) {
         toast(msg, 5000);
         return;
       }
-      const filename = `${folder()}/${sanitizeFilename(title)}.pdf`;
-      await savePdf(result.blob, filename);
+      const filename = `${folder()}/${sanitizeFilename(title) || `images_${timestamp()}`}.pdf`;
+      const saved = await savePdf(result.blob, filename);
       const skipped = result.skipped.map((s) => `${s.label}(${s.reason})`).join(', ');
-      const msg = `PDF 저장: ${result.included}장 → ${filename}${skipped ? ` · 제외: ${skipped}` : ''}`;
+      const msg = `PDF 저장: ${result.included}장 → ${saved}${skipped ? ` · 제외: ${skipped}` : ''}`;
       $('#pasteSummary').textContent = msg;
       toast(msg, 6000);
     } catch (e) {

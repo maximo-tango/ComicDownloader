@@ -1,6 +1,6 @@
 {
   "name": "image-hunter",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Chrome MV3 extension: find original (non-thumbnail) images, browse them sequentially and batch download.",
   "type": "module",

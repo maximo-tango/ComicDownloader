@@ -588,8 +588,8 @@ $('#btnPdf').addEventListener('click', async () => {
     const filename = `${buildFolder(settings, { pageTitle: state.page?.title, url: state.page?.url })}/${sanitizeFilename(title) || 'images'}.pdf`;
     const save = async () => {
       $('#pdfSavePartial').hidden = true;
-      await savePdf(result.blob, filename);
-      $('#pdfStatus').textContent = `PDF 저장: ${result.included}장 포함${result.skipped.length ? `, ${result.skipped.length}장 제외` : ''} → ${filename}`;
+      const saved = await savePdf(result.blob, filename);
+      $('#pdfStatus').textContent = `PDF 저장: ${result.included}장 포함${result.skipped.length ? `, ${result.skipped.length}장 제외` : ''} → ${saved}`;
     };
     const blocked = result.skipped.filter((s) => s.needsPermission).length;
     offerSiteAccess(result.skipped);
