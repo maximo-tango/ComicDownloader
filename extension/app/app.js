@@ -538,7 +538,8 @@ async function downloadItems(list) {
   if (retryIds.length) notes.push(`실패·취소했던 ${retryIds.length}개 다시 시도`);
   if (skipped.done) notes.push(`이미 받았거나 진행 중인 ${skipped.done}개 제외`);
   if (skipped.pending) notes.push(`확인 중인 ${skipped.pending}개 제외`);
-  toast(`${jobs.length}개를 다운로드 대기열에 추가했습니다.${notes.length ? ' (' + notes.join(', ') + ')' : ''}`, 3500);
+  const head = jobs.length ? `${jobs.length}개를 다운로드 대기열에 추가했습니다.` : '새로 추가한 다운로드가 없습니다.';
+  toast(`${head}${notes.length ? ' (' + notes.join(', ') + ')' : ''}`, 3500);
 }
 
 $('#btnDownload').addEventListener('click', () => downloadItems(selectedInOrder()));
