@@ -310,6 +310,20 @@ export async function autoScroll(options) {
 }
 
 /**
+ * Links on the page in document order (for "목록 페이지에서 링크 추출").
+ * Read-only; the extension decides which ones to keep.
+ */
+export function collectLinks() {
+  const links = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (typeof a.href !== 'string') continue; // SVG <a>
+    const text = (a.innerText || a.getAttribute('title') || a.querySelector('img[alt]')?.alt || '').trim().slice(0, 200);
+    links.push({ url: a.href, text });
+  }
+  return { pageUrl: location.href, title: document.title, links };
+}
+
+/**
  * Reads an image through the page itself (same-origin images, the page's own
  * cookies) and returns it as a data: URL. Used only to build PDFs when the
  * extension cannot read the file directly; it does not bypass CORS.

@@ -150,6 +150,19 @@ export function startServer(port = 8765) {
       }
       return html(res, '<!doctype html><meta charset="utf-8"><title>알림</title><p>요청하신 페이지를 찾을 수 없습니다.</p>');
     }
+    // Episode list for "목록 페이지에서 링크 추출": newest first, a thumbnail link that
+    // repeats an episode, one missing episode, and links that aren't episodes.
+    if (path === '/wt/500') {
+      const other = `http://localhost:${url.port}`;
+      return html(res, `<!doctype html><meta charset="utf-8"><title>웹툰 목록</title>
+<nav><a href="/">홈</a> <a href="/order">다른 메뉴</a> <a href="${other}/wt/500/1001">다른 사이트</a></nav>
+<ul>
+<li><a href="/wt/500/1009"><img src="/img/a.png" width="20" height="20"></a> <a href="/wt/500/1009#top">9화</a></li>
+<li><a href="/wt/500/1004">4화</a></li>
+<li><a href="/wt/500/1002">2화 (삭제됨)</a></li>
+<li><a href="/wt/500/1001">1화</a></li>
+</ul><a href="/wt/500?page=2">다음 목록</a>`);
+    }
     if (path === '/wt/500/list') return html(res, '<!doctype html><meta charset="utf-8"><title>작품 목록</title><ul><li>목록</li></ul>');
     if (path === '/many') return html(res, manyPage(Math.min(5000, Number(url.searchParams.get('n')) || 1000)));
     if (path === '/webtoon/1') return html(res, '<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');

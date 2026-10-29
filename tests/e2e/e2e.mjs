@@ -43,7 +43,10 @@ const tmp = mkdtempSync(path.join(tmpdir(), 'ih-e2e-'));
 const extPath = path.join(tmp, 'extension');
 cpSync(path.join(root, 'extension'), extPath, { recursive: true });
 const manifest = JSON.parse(readFileSync(path.join(extPath, 'manifest.json'), 'utf8'));
+// The shipped manifest asks for every site; the copy keeps only 127.0.0.1 (like a
+// user restricting site access in Chrome) so the no-permission paths stay tested.
 manifest.host_permissions = ['http://127.0.0.1/*'];
+manifest.optional_host_permissions = ['<all_urls>'];
 writeFileSync(path.join(extPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
 const profile = path.join(tmp, 'profile');
@@ -657,6 +660,31 @@ await step('연속 PDF: 중간에 없는 주소는 확인 후 건너뜀, 범위 
   assert.match(await app.$eval('#toast', (e) => e.textContent), /없는 주소 3번 연속 — 끝으로 판단/);
 });
 
+await step('연속 PDF: 목록 페이지에서 링크 추출 — 비슷한 링크만, 페이지 순서, 고른 것만 처리', async () => {
+  await app.bringToFront();
+  await app.click('input[name="bMode"][value="list"]');
+  assert.equal(await app.$eval('#bSeriesPanel', (e) => e.hidden), true);
+  await app.$eval('#lUrl', (e, u) => (e.value = u), `${SITE}/wt/500`);
+  await app.click('#lFetch');
+  await app.waitForFunction(() => !document.querySelector('#lTable').hidden && !document.querySelector('#lFetch').disabled, { timeout: 60000 });
+  const rowsOf = () => app.$$eval('#lTable tbody tr', (trs) => trs.map((tr) => tr.children[2].textContent + ' ' + new URL(tr.children[3].textContent).pathname));
+  assert.deepEqual(await rowsOf(), ['9화 /wt/500/1009', '4화 /wt/500/1004', '2화 (삭제됨) /wt/500/1002', '1화 /wt/500/1001']);
+  await app.select('#lRule', 'site');
+  assert.deepEqual((await rowsOf()).map((r) => r.split(' ')[0]), ['홈', '다른', '9화', '4화', '2화', '1화', '다음'], 'same site: other links too, never another site');
+  await app.select('#lRule', 'similar');
+  await app.click('#lReverse');
+  assert.deepEqual((await rowsOf()).map((r) => r.split(' ')[0]), ['1화', '2화', '4화', '9화']);
+  await app.click('#lTable tbody tr:nth-child(3) input'); // skip 4화
+  assert.match(await app.$eval('#lPreview', (e) => e.textContent), /^링크 4개 중 3개 선택/);
+  await app.$eval('#bFolder', (e) => (e.value = '목록'));
+  await app.click('#bRun');
+  await app.waitForFunction(() => !document.querySelector('#bRun').disabled && /확인 3 \/ 3 · 완료 2 · 없음 1 · 건너뜀 0 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 }).catch(async (e) => {
+    throw new Error(`${e.message}\nsummary: ${await app.$eval('#bSummary', (x) => x.textContent)}`);
+  });
+  assert.deepEqual(files(path.join(downloadDir, 'ImageHunter', '목록')), ['웹툰 1001.pdf', '웹툰 1009.pdf']);
+  await app.click('input[name="bMode"][value="series"]');
+});
+
 await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 스크롤', async () => {
   await ext(() => chrome.storage.local.remove('settings'));
   const site2 = await openSite('/?defaults');
@@ -694,7 +722,7 @@ await step('팝업·설정 화면 동작 및 콘솔 오류 없음', async () => 
   const s = await opt.evaluate(() => chrome.storage.local.get('settings').then((r) => r.settings));
   assert.equal(s.folderMode, 'site');
   await opt.select('select[name="folderMode"]', 'page');
-  assert.match(await opt.$eval('#permState', (e) => e.textContent), /메뉴를 연 탭에만 접근/);
+  assert.match(await opt.$eval('#permState', (e) => e.textContent), /사이트 접근이 제한됨/, 'test copy has restricted site access');
   await opt.close();
   assert.deepEqual(consoleErrors, []);
 });

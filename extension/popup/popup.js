@@ -17,7 +17,8 @@ const openApp = async (params) => {
 };
 analyze.addEventListener('click', () => openApp({ tabId: tab.id }));
 document.querySelector('#paste').addEventListener('click', () => openApp({ view: 'paste' }));
-// Pre-fill the series with the current page's address.
+// Pre-fill with the current page's address: as the list page, or as one page of the series.
+document.querySelector('#batchList').addEventListener('click', () => openApp({ view: 'batch', ...(analysable && /^https?:/.test(tab.url) ? { list: tab.url } : {}) }));
 document.querySelector('#batch').addEventListener('click', () => openApp({ view: 'batch', ...(analysable && /^https?:/.test(tab.url) ? { url: tab.url } : {}) }));
 document.querySelector('#downloads').addEventListener('click', () => openApp({ view: 'downloads' }));
 document.querySelector('#options').addEventListener('click', () => {

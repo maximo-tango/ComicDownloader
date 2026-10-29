@@ -115,7 +115,31 @@
 
     <!-- ============ 연속 PDF ============ -->
     <section id="view-batch" class="view" hidden>
-      <div class="panel">
+      <div class="panel" role="radiogroup" aria-label="처리할 주소 정하기">
+        <span class="field"><span>처리할 주소</span></span>
+        <label class="check"><input type="radio" name="bMode" value="series" checked> 번호 바꾸기</label>
+        <label class="check"><input type="radio" name="bMode" value="list"> 목록 페이지에서 링크 추출</label>
+      </div>
+      <div id="bListPanel" class="panel" hidden>
+        <label class="field grow"><span>목록 주소</span><input id="lUrl" type="url" placeholder="회차 목록 페이지 주소를 붙여넣으세요 (예: …/webtoon/list?titleId=…)"></label>
+        <label class="check"><input id="lScroll" type="checkbox" checked> 목록도 스크롤하며 찾기</label>
+        <button id="lFetch" class="btn small primary">링크 찾기</button>
+        <div class="row" style="width:100%">
+          <label class="field"><span>추출 범위</span><select id="lRule"><option value="similar">목록 주소와 비슷한 링크</option><option value="site">같은 사이트 전체</option></select></label>
+          <label class="field"><span>주소에 포함</span><input id="lContains" type="text" placeholder="(선택)" maxlength="200"></label>
+          <button id="lAll" class="btn small">모두 선택</button>
+          <button id="lNone" class="btn small">모두 해제</button>
+          <button id="lReverse" class="btn small" title="목록이 최신 회차부터 나오면 뒤집어 1화부터 처리합니다">순서 뒤집기</button>
+        </div>
+        <div id="lPreview" class="status-line"></div>
+        <div class="table-wrap link-list" style="width:100%">
+          <table id="lTable" class="table" hidden>
+            <thead><tr><th class="c-check">선택</th><th>#</th><th>링크 글자</th><th>주소</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="bSeriesPanel" class="panel">
         <label class="field grow"><span>주소</span><input id="bUrl" type="url" placeholder="회차 하나의 주소를 붙여넣으세요 (예: …detail?titleId=…&amp;no=116)"></label>
         <label class="field"><span>바꿀 부분</span><select id="bParam"><option value="">주소를 먼저 입력하세요</option></select></label>
         <label class="field"><span>시작</span><input id="bStart" type="number" min="0"></label>
@@ -138,7 +162,7 @@
         <button id="bRetry" class="btn small">실패·건너뜀 다시</button>
         <button id="bStop" class="btn small" disabled>중지</button>
         <button id="bRun" class="btn primary">시작</button>
-        <p class="hint" style="width:100%">각 페이지를 차례로 열어 스크롤로 이미지를 불러온 뒤, 조건에 맞는 이미지를 페이지 순서대로 PDF 한 개로 저장합니다(다운로드 폴더 → ImageHunter). 파일 이름은 페이지 제목입니다. 시작할 때 그 사이트 접근 허용을 묻습니다.</p>
+        <p class="hint" style="width:100%">각 페이지(번호를 바꾼 주소, 또는 목록에서 고른 링크)를 차례로 열어 스크롤로 이미지를 불러온 뒤, 조건에 맞는 이미지를 페이지 순서대로 PDF 한 개로 저장합니다(다운로드 폴더 → ImageHunter). 파일 이름은 페이지 제목입니다. 시작할 때 그 사이트 접근 허용을 묻습니다.</p>
       </div>
       <div id="bPermission" class="panel" hidden>
         <div id="bPermissionText" class="grow"></div>

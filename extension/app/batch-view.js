@@ -1,17 +1,17 @@
-// "연속 PDF" view: open a series of pages (one number in the URL changes),
-// scroll each to load its images, keep the ones matching the size filter and
-// save one PDF per page. Pages are processed one at a time.
+// "연속 PDF" view: open a series of pages (one number in the URL changes, or
+// links picked from a list page), scroll each to load its images, keep the ones
+// matching the size filter and save one PDF per page. Pages are processed one at a time.
 
 import { $, h, toast } from './common.js';
 import { createPdf, savePdf } from './pdf-export.js';
-import { collectImages, autoScroll, readImageInPage } from '../content/collector.js';
+import { collectImages, collectLinks, autoScroll, readImageInPage } from '../content/collector.js';
 import { createProber, decodeWithImage, hostAccessPolicy, setCredentialPolicy } from '../lib/probe.js';
 import { resolveEntry } from '../lib/resolver.js';
 import { applyFilters, DEFAULT_FILTERS } from '../lib/filters.js';
 import { dedupeInOrder } from '../lib/ordering.js';
 import { urlKey } from '../lib/url-utils.js';
 import { buildFolder, sanitizeFilename } from '../lib/filename.js';
-import { findNumericParams, makeSeries, notFoundReason } from '../lib/batch.js';
+import { findNumericParams, makeSeries, notFoundReason, pickLinks, similarHint } from '../lib/batch.js';
 
 const STEP = {
   waiting: '대기', opening: '페이지 여는 중', scrolling: '스크롤하며 이미지 불러오는 중', analyzing: '원본 확인 중',
@@ -75,6 +75,112 @@ export function initBatchView({ getSettings }) {
   });
   for (const id of ['bStart', 'bEnd', 'bStep', 'bStopAfter']) $('#' + id).addEventListener('input', preview);
   $('#bShowMissing').addEventListener('change', () => rows.forEach(renderRow));
+
+  // ---- list page mode -----------------------------------------------------
+  const mode = () => document.querySelector('input[name="bMode"]:checked').value;
+  function setMode(m) {
+    document.querySelector(`input[name="bMode"][value="${m}"]`).checked = true;
+    $('#bListPanel').hidden = m !== 'list';
+    $('#bSeriesPanel').hidden = m === 'list';
+  }
+  for (const r of document.querySelectorAll('input[name="bMode"]')) r.addEventListener('change', () => setMode(mode()));
+
+  let listSource = null; // { url, links } as read from the list page
+  let picked = [];
+  const unchecked = new Set();
+  let reversed = false;
+  let fetching = false;
+
+  function renderLinks() {
+    const tb = $('#lTable tbody');
+    if (!listSource) {
+      picked = [];
+      tb.replaceChildren();
+      $('#lTable').hidden = true;
+      return;
+    }
+    const opts = { contains: $('#lContains').value };
+    const counts = { similar: pickLinks(listSource.url, listSource.links, { ...opts, rule: 'similar' }).length, site: pickLinks(listSource.url, listSource.links, { ...opts, rule: 'site' }).length };
+    const [o1, o2] = $('#lRule').options;
+    o1.textContent = `목록 주소와 비슷한 링크 (${similarHint(listSource.url)}) — ${counts.similar}개`;
+    o2.textContent = `같은 사이트 전체 (${new URL(listSource.url).origin}/) — ${counts.site}개`;
+    picked = pickLinks(listSource.url, listSource.links, { ...opts, rule: $('#lRule').value });
+    if (reversed) picked.reverse();
+    tb.replaceChildren(
+      ...picked.map((l, i) => {
+        const box = h('input', { type: 'checkbox', 'aria-label': `${i + 1}번 선택` });
+        box.checked = !unchecked.has(l.url);
+        box.addEventListener('change', () => {
+          box.checked ? unchecked.delete(l.url) : unchecked.add(l.url);
+          linkSummary();
+        });
+        return h('tr', {}, h('td', { class: 'c-check' }, box), h('td', {}, String(i + 1)), h('td', {}, l.text), h('td', { class: 'url', title: l.url }, l.url));
+      }),
+    );
+    $('#lTable').hidden = !picked.length;
+    linkSummary();
+  }
+  const chosenLinks = () => picked.filter((l) => !unchecked.has(l.url));
+  function linkSummary() {
+    $('#lPreview').classList.toggle('error', !picked.length);
+    $('#lPreview').textContent = picked.length
+      ? `링크 ${picked.length}개 중 ${chosenLinks().length}개 선택 · 위에서부터 차례로 처리합니다${reversed ? ' (뒤집은 순서)' : ''}`
+      : `조건에 맞는 링크가 없습니다 (페이지의 링크 ${listSource.links.length}개). 추출 범위를 "같은 사이트 전체"로 바꿔 보세요.`;
+  }
+  $('#lRule').addEventListener('change', renderLinks);
+  $('#lContains').addEventListener('input', renderLinks);
+  $('#lAll').addEventListener('click', () => {
+    picked.forEach((l) => unchecked.delete(l.url));
+    renderLinks();
+  });
+  $('#lNone').addEventListener('click', () => {
+    picked.forEach((l) => unchecked.add(l.url));
+    renderLinks();
+  });
+  $('#lReverse').addEventListener('click', () => {
+    reversed = !reversed;
+    renderLinks();
+  });
+
+  $('#lFetch').addEventListener('click', async () => {
+    if (fetching || running) return toast(running ? '연속 PDF가 진행 중입니다.' : '링크를 찾는 중입니다.');
+    let u;
+    try {
+      u = new URL($('#lUrl').value.trim());
+      if (!/^https?:$/.test(u.protocol)) throw new Error();
+    } catch {
+      return toast('목록 주소(http:// 또는 https://)를 입력하세요.');
+    }
+    // Reading the list in a tab of its own needs access to that site.
+    const granted = await chrome.permissions.request({ origins: [`${u.origin}/*`] }).catch(() => false);
+    if (!granted) return toast(`${u.host} 접근을 허용해야 목록 페이지를 열 수 있습니다.`, 4000);
+    fetching = true;
+    $('#lFetch').disabled = true;
+    $('#lPreview').classList.remove('error');
+    $('#lPreview').textContent = '목록 페이지 여는 중…';
+    let tabId = null;
+    try {
+      tabId = await openTab(u.href);
+      await wait(800);
+      if ($('#lScroll').checked) {
+        $('#lPreview').textContent = '목록을 스크롤하며 링크 불러오는 중…';
+        await scrollInTab(tabId, getSettings().scrollMaxScreens);
+      }
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: collectLinks });
+      listSource = { url: result.pageUrl, links: result.links };
+      unchecked.clear();
+      reversed = false;
+      $('#lRule').value = pickLinks(listSource.url, listSource.links, { rule: 'similar' }).length ? 'similar' : 'site';
+      renderLinks();
+    } catch (e) {
+      $('#lPreview').classList.add('error');
+      $('#lPreview').textContent = `목록을 읽지 못했습니다: ${e?.message || e}`;
+    } finally {
+      fetching = false;
+      $('#lFetch').disabled = false;
+      if (tabId != null) chrome.tabs.remove(tabId).catch(() => {});
+    }
+  });
 
   // ---- table --------------------------------------------------------------
   function renderRow(r) {
@@ -260,7 +366,7 @@ export function initBatchView({ getSettings }) {
     stop = false;
     $('#bRun').disabled = $('#bRetry').disabled = true;
     $('#bStop').disabled = false;
-    const ctx = { probe: createProber({ decode: decodeWithImage, concurrency: 8 }), filters: currentFilters(), param: currentParam() };
+    const ctx = { probe: createProber({ decode: decodeWithImage, concurrency: 8 }), filters: currentFilters(), param: mode() === 'list' ? null : currentParam() };
     setCredentialPolicy(hostAccessPolicy());
     const stopAfter = Math.max(1, Number($('#bStopAfter').value) || 10);
     let misses = 0;
@@ -310,9 +416,15 @@ export function initBatchView({ getSettings }) {
 
   $('#bRun').addEventListener('click', async () => {
     if (running) return toast('이미 진행 중입니다. 끝나거나 중지한 뒤 다시 시작하세요.');
+    if (fetching) return toast('목록에서 링크를 찾는 중입니다.');
     let sr;
     try {
-      sr = series();
+      if (mode() === 'list') {
+        const chosen = chosenLinks();
+        if (!listSource) throw new Error('목록 주소를 넣고 "링크 찾기"를 누르세요.');
+        if (!chosen.length) throw new Error('처리할 링크를 하나 이상 선택하세요.');
+        sr = { count: chosen.length, at: (i) => (i < chosen.length ? { n: i + 1, url: chosen[i].url, title: chosen[i].text } : null) };
+      } else sr = series();
     } catch (e) {
       return toast(e.message);
     }
@@ -327,6 +439,14 @@ export function initBatchView({ getSettings }) {
     summary();
     run(sr);
   });
+
+  return {
+    /** Prefill from the menu: a list page address. */
+    openList(url) {
+      setMode('list');
+      $('#lUrl').value = url;
+    },
+  };
   $('#bStop').addEventListener('click', () => {
     stop = true;
     toast('지금 처리 중인 페이지까지만 하고 멈춥니다.');

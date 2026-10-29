@@ -108,16 +108,22 @@ const NOT_FOUND_TEXT = /page not found|not found|404|존재하지 않|찾을 수
  * Does a response mean "this address doesn't exist"?
  *  - HTTP error status (404, 410, …)
  *  - redirected somewhere that no longer carries the number we asked for
- *    (e.g. a missing episode sends you to the series list)
+ *    (e.g. a missing episode sends you to the series list); without a number
+ *    (links from a list page), redirected to another path
  *  - a page whose title says "not found"; a very short body saying so counts too
  * @returns reason string, or '' when the page looks real
  */
 export function notFoundReason({ status = 200, requestedUrl, finalUrl, param, title = '', bodyText = null }) {
   if (status >= 400) return `HTTP ${status}`;
-  if (finalUrl && requestedUrl && finalUrl !== requestedUrl && param) {
-    const want = valueOf(requestedUrl, param);
-    const got = valueOf(finalUrl, param);
-    if (want != null && got !== want) return `다른 페이지로 이동됨 (${shortUrl(finalUrl)})`;
+  if (finalUrl && requestedUrl && finalUrl !== requestedUrl) {
+    if (param) {
+      const want = valueOf(requestedUrl, param);
+      const got = valueOf(finalUrl, param);
+      if (want != null && got !== want) return `다른 페이지로 이동됨 (${shortUrl(finalUrl)})`;
+    } else if (pathOf(finalUrl) !== pathOf(requestedUrl)) {
+      // A link from a list page: no number to compare, so a move to another path counts.
+      return `다른 페이지로 이동됨 (${shortUrl(finalUrl)})`;
+    }
   }
   if (NOT_FOUND_TEXT.test(title)) return `페이지 제목: ${title.trim().slice(0, 60)}`;
   if (bodyText != null) {
@@ -138,11 +144,92 @@ function valueOf(url, param) {
   }
 }
 
+function pathOf(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname.replace(/\/+$/, '');
+  } catch {
+    return url;
+  }
+}
+
 function shortUrl(u) {
   try {
     const x = new URL(u);
     return x.host + x.pathname + x.search;
   } catch {
     return u;
+  }
+}
+
+/**
+ * Links from a list page (an episode list) that point to pages to process.
+ * Only http(s) links on the same site as the list are kept, in page order,
+ * without duplicates (fragments ignored) and without the list page itself.
+ *  - rule 'similar': below the list address ("/webtoon/123" → "/webtoon/123/…"),
+ *    or next to it with the same id in the query ("list?titleId=7" → "detail?titleId=7&no=1")
+ *  - rule 'site': anywhere on the same site
+ * @param links [{ url, text }]
+ * @returns [{ url, text }]
+ */
+export function pickLinks(listUrl, links, { rule = 'similar', contains = '' } = {}) {
+  let list;
+  try {
+    list = new URL(listUrl);
+  } catch {
+    return [];
+  }
+  list.hash = '';
+  const dir = list.pathname.replace(/\/+$/, '') + '/';
+  const parent = list.pathname.replace(/[^/]*$/, '');
+  const ids = [...list.searchParams].filter(([, v]) => /^\d+$/.test(v));
+  const similar = (u) =>
+    (u.pathname.startsWith(dir) && u.pathname !== dir) ||
+    (ids.length > 0 && u.pathname !== list.pathname && u.pathname.startsWith(parent) && ids.some(([k, v]) => u.searchParams.get(k) === v));
+  const needle = contains.trim().toLowerCase();
+  const out = [];
+  const byUrl = new Map();
+  for (const l of links) {
+    let u;
+    try {
+      u = new URL(l.url); // a.href is already absolute
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(u.protocol) || u.origin !== list.origin) continue;
+    u.hash = '';
+    const url = u.href;
+    if (url === list.href || (rule === 'similar' && !similar(u))) continue;
+    if (needle && !safeDecode(url).toLowerCase().includes(needle)) continue;
+    const text = String(l.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const seen = byUrl.get(url);
+    // Lists often link an episode twice (thumbnail, then title): keep the first place, the first text.
+    if (seen) {
+      if (!seen.text) seen.text = text;
+      continue;
+    }
+    const item = { url, text };
+    byUrl.set(url, item);
+    out.push(item);
+  }
+  return out;
+}
+
+/** Short description of what 'similar' keeps, for the rule picker. */
+export function similarHint(listUrl) {
+  try {
+    const u = new URL(listUrl);
+    const ids = [...u.searchParams].filter(([, v]) => /^\d+$/.test(v)).map(([k, v]) => `${k}=${v}`);
+    return `${u.pathname.replace(/\/+$/, '')}/…${ids.length ? ` 또는 ${ids.join(', ')}이 같은 주소` : ''}`;
+  } catch {
+    return '';
+  }
+}
+
+function safeDecode(s) {
+  try {
+    return decodeURI(s);
+  } catch {
+    return s;
   }
 }

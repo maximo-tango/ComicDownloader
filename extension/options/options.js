@@ -42,18 +42,16 @@ form.addEventListener('change', async () => {
 
 async function showPermission() {
   const has = await chrome.permissions.contains(ALL);
-  document.querySelector('#permState').textContent = has ? '현재 상태: 모든 사이트 접근 허용됨' : '현재 상태: 메뉴를 연 탭에만 접근 (기본)';
+  document.querySelector('#permState').textContent = has ? '현재 상태: 모든 사이트 접근 허용됨 (기본)' : '현재 상태: Chrome 설정에서 사이트 접근이 제한됨 — 필요할 때마다 묻습니다';
   document.querySelector('#grant').disabled = has;
-  document.querySelector('#revoke').disabled = !has;
 }
 document.querySelector('#grant').addEventListener('click', async () => {
   await chrome.permissions.request(ALL).catch(() => false);
   showPermission();
 });
-document.querySelector('#revoke').addEventListener('click', async () => {
-  await chrome.permissions.remove(ALL).catch(() => false);
-  showPermission();
-});
+document.querySelector('#siteAccess').addEventListener('click', () => chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` }));
+chrome.permissions.onAdded.addListener(showPermission);
+chrome.permissions.onRemoved.addListener(showPermission);
 
 fill(await loadSettings());
 showPermission();

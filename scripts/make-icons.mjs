@@ -1,4 +1,4 @@
-// Generates the extension icons (magnifier over a picture frame) as PNGs, no dependencies.
+// Generates the extension icons (a page of stacked pictures with a download badge) as PNGs, no dependencies.
 import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
@@ -23,24 +23,33 @@ const chunk = (type, data) => {
 
 function shade(x, y) {
   // Coordinates in a 0..1 square. Returns [r,g,b,a] or null.
-  const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
-  // rounded-square background
-  const r = 0.2;
-  const qx = Math.max(Math.abs(x - 0.5) - (0.5 - r), 0);
-  const qy = Math.max(Math.abs(y - 0.5) - (0.5 - r), 0);
-  if (Math.hypot(qx, qy) > r) return null;
-  let col = [47, 111, 237, 255];
-  // handle: segment from the lens rim towards the bottom-right corner
-  const t = Math.max(0, Math.min(1, ((x - 0.6) + (y - 0.6)) / (2 * 0.2)));
-  if (dist(x, y, 0.6 + t * 0.2, 0.6 + t * 0.2) < 0.07) col = [255, 255, 255, 255];
-  // lens ring + glass
-  const d = dist(x, y, 0.43, 0.43);
-  if (d < 0.25) col = [222, 233, 255, 255];
-  if (d >= 0.2 && d < 0.27) col = [255, 255, 255, 255];
-  // tiny mountain picture inside the lens
-  if (d < 0.2) {
-    if (y > 0.47 && y - 0.47 > Math.abs(x - 0.38) * 1.1 - 0.12 + 0.0 && y < 0.62) col = [46, 160, 98, 255];
-    if (dist(x, y, 0.5, 0.36) < 0.045) col = [255, 186, 59, 255];
+  // Rounded square, a tall page of stacked pictures (a webtoon strip) and a
+  // download badge in the corner.
+  const box = (cx, cy, hw, hh, r) => {
+    const qx = Math.max(Math.abs(x - cx) - (hw - r), 0);
+    const qy = Math.max(Math.abs(y - cy) - (hh - r), 0);
+    return Math.hypot(qx, qy) <= r;
+  };
+  if (!box(0.5, 0.5, 0.5, 0.5, 0.22)) return null;
+  // background: vertical gradient, indigo to violet
+  const g = Math.min(1, Math.max(0, y));
+  let col = [Math.round(67 + 60 * g), Math.round(56 + 10 * g), Math.round(202 + 20 * g), 255];
+  // the page
+  if (box(0.4, 0.5, 0.22, 0.34, 0.05)) {
+    col = [255, 255, 255, 255];
+    // three panels on the page
+    if (box(0.4, 0.29, 0.16, 0.085, 0.02)) col = [255, 183, 77, 255];
+    if (box(0.4, 0.5, 0.16, 0.085, 0.02)) col = [94, 205, 160, 255];
+    if (box(0.4, 0.71, 0.16, 0.085, 0.02)) col = [120, 170, 255, 255];
+  }
+  // download badge
+  const d = Math.hypot(x - 0.72, y - 0.72);
+  if (d < 0.22) col = [255, 255, 255, 255];
+  if (d < 0.18) {
+    col = [244, 81, 108, 255];
+    const stem = Math.abs(x - 0.72) < 0.035 && y > 0.6 && y < 0.75;
+    const head = y >= 0.69 && y < 0.82 && Math.abs(x - 0.72) < 0.82 - y;
+    if (stem || head) col = [255, 255, 255, 255];
   }
   return col;
 }

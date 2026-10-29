@@ -644,7 +644,7 @@ $('#pdfLayout').addEventListener('change', async (e) => {
 });
 
 // ---------------------------------------------------------------- other views
-initBatchView({ getSettings: () => settings });
+const batchView = initBatchView({ getSettings: () => settings });
 const pasteView = initPasteView({ getSettings: () => settings, probe, enqueue });
 initDownloadsView({
   getSettings: () => settings,
@@ -667,3 +667,4 @@ if (params.get('view') === 'batch' && params.get('url')) {
   $('#bUrl').value = params.get('url');
   $('#bUrl').dispatchEvent(new Event('input'));
 }
+if (params.get('view') === 'batch' && params.get('list')) batchView.openList(params.get('list'));

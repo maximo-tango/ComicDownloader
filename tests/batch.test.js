@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSeries, findNumericParams, makeSeries, notFoundReason } from '../extension/lib/batch.js';
+import { buildSeries, findNumericParams, makeSeries, notFoundReason, pickLinks, similarHint } from '../extension/lib/batch.js';
 
 const NAVER = 'https://comic.naver.com/webtoon/detail?titleId=821597&no=116&week=tue';
 
@@ -86,4 +86,50 @@ test('numbers inside a part ("nv-752414-1"): each digit run separately, the last
 
 test('percent escapes in a path are not numbers', () => {
   assert.deepEqual(findNumericParams('https://a.com/%EC%9B%B9%ED%88%B0-5').map((x) => x.value), ['5']);
+});
+
+test('list page links: same site, similar to the list address, page order, no duplicates', () => {
+  const list = 'https://a.com/webtoon/123';
+  const links = [
+    { url: 'https://a.com/', text: '홈' },
+    { url: 'https://a.com/webtoon/123/9003', text: '' },
+    { url: 'https://a.com/webtoon/123/9003#top', text: '3화' },
+    { url: 'https://a.com/webtoon/123/9002', text: '  2화\n 제목 ' },
+    { url: 'https://a.com/webtoon/123#comments', text: '댓글' },
+    { url: 'https://a.com/webtoon/123?page=2', text: '다음 목록' },
+    { url: 'https://a.com/webtoon/456/1', text: '다른 작품' },
+    { url: 'https://b.com/webtoon/123/1', text: '다른 사이트' },
+    { url: 'javascript:void(0)', text: 'x' },
+    { url: 'not a url', text: 'x' },
+    { url: 'https://a.com/webtoon/123/9001', text: '1화' },
+  ];
+  assert.deepEqual(pickLinks(list, links), [
+    { url: 'https://a.com/webtoon/123/9003', text: '3화' },
+    { url: 'https://a.com/webtoon/123/9002', text: '2화 제목' },
+    { url: 'https://a.com/webtoon/123/9001', text: '1화' },
+  ]);
+  assert.deepEqual(pickLinks(list + '/', links).map((l) => l.text), ['3화', '2화 제목', '1화'], 'trailing slash on the list address');
+  assert.deepEqual(pickLinks(list, links, { rule: 'site' }).map((l) => l.text), ['홈', '3화', '2화 제목', '다음 목록', '다른 작품', '1화']);
+  assert.deepEqual(pickLinks(list, links, { rule: 'site', contains: '/webtoon/456' }).map((l) => l.text), ['다른 작품']);
+  assert.deepEqual(pickLinks('bad', links), []);
+});
+
+test('list page links: query-style lists keep pages next to the list with the same id', () => {
+  const list = 'https://comic.naver.com/webtoon/list?titleId=821597';
+  const links = [
+    { url: 'https://comic.naver.com/webtoon/detail?titleId=821597&no=116', text: '116화' },
+    { url: 'https://comic.naver.com/webtoon/detail?titleId=999&no=1', text: '다른 작품' },
+    { url: 'https://comic.naver.com/webtoon/list?titleId=821597&page=2', text: '2' },
+    { url: 'https://comic.naver.com/webtoon/detail?titleId=821597&no=115', text: '115화' },
+  ];
+  assert.deepEqual(pickLinks(list, links).map((l) => l.text), ['116화', '115화']);
+  assert.match(similarHint(list), /^\/webtoon\/list\/… 또는 titleId=821597이 같은 주소$/);
+});
+
+test('without a number (list page links), a redirect to another path means missing', () => {
+  const req = 'https://a.com/webtoon/123/9002';
+  assert.match(notFoundReason({ requestedUrl: req, finalUrl: 'https://a.com/webtoon/123', title: '목록' }), /다른 페이지로 이동됨/);
+  assert.match(notFoundReason({ requestedUrl: req, finalUrl: 'https://a.com/login?next=x', title: '로그인' }), /다른 페이지로 이동됨/);
+  assert.equal(notFoundReason({ requestedUrl: req, finalUrl: req + '/', title: '2화' }), '', 'trailing slash only');
+  assert.equal(notFoundReason({ requestedUrl: req, finalUrl: req + '?from=list', title: '2화' }), '', 'query added');
 });

@@ -51,15 +51,17 @@
     </form>
 
     <section class="panel settings">
-      <h2>사이트 접근 권한 (선택)</h2>
-      <p class="hint">기본적으로 Image Hunter는 메뉴를 연 탭에만 일시적으로 접근합니다(activeTab). 아래 권한을 허용하면 다음이 가능해집니다.</p>
+      <h2>사이트 접근 권한</h2>
+      <p class="hint">Image Hunter는 설치할 때 모든 사이트 접근을 기본으로 받습니다. 그래서 다음이 따로 묻지 않고 됩니다.</p>
       <ul class="hint">
         <li>다른 사이트(CDN)에 있는 이미지의 실제 파일 크기·형식 확인</li>
         <li>다른 사이트 이미지를 PDF에 넣기</li>
+        <li>연속 PDF에서 페이지를 자동으로 열고 읽기</li>
         <li>페이지 안 다른 사이트 iframe의 이미지 추출</li>
       </ul>
+      <p class="hint">줄이고 싶으면 Chrome 확장 프로그램 설정의 <b>사이트 액세스</b>에서 "클릭 시" 또는 "특정 사이트에서"로 바꿀 수 있습니다. 그러면 필요할 때마다 허용 여부를 묻습니다.</p>
       <p id="permState" class="count-line"></p>
-      <div class="row"><button id="grant" class="btn primary" type="button">모든 사이트 접근 허용</button><button id="revoke" class="btn" type="button">권한 해제</button></div>
+      <div class="row"><button id="grant" class="btn primary" type="button">모든 사이트 접근 다시 허용</button><button id="siteAccess" class="btn" type="button">Chrome에서 사이트 액세스 바꾸기</button></div>
     </section>
   </main>
   <script type="module" src="options.js"></script>

@@ -168,3 +168,5 @@ code { font-size: 12px; background: var(--chip); padding: 0 4px; border-radius: 
 
 .status-line.error { color: var(--bad); }
 #view-batch .field input[type="url"] { min-width: 0; }
+.link-list { max-height: 360px; overflow: auto; }
+#lTable td.url { max-width: 520px; }
