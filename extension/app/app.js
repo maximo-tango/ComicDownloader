@@ -556,6 +556,7 @@ $('#btnPdf').addEventListener('click', async () => {
   const panel = $('#pdfPanel');
   panel.hidden = false;
   $('#pdfSkipped').replaceChildren();
+  $('#pdfGrant').hidden = $('#pdfSavePartial').hidden = true;
   const title = state.page?.title || 'images';
   try {
     const result = await createPdf(
@@ -575,13 +576,28 @@ $('#btnPdf').addEventListener('click', async () => {
       },
     );
     $('#pdfSkipped').replaceChildren(...result.skipped.map((s) => h('li', {}, `${s.label} 제외: ${s.reason}`)));
+    const filename = `${buildFolder(settings, { pageTitle: state.page?.title, url: state.page?.url })}/${sanitizeFilename(title) || 'images'}.pdf`;
+    const save = async () => {
+      $('#pdfSavePartial').hidden = true;
+      await savePdf(result.blob, filename);
+      $('#pdfStatus').textContent = `PDF 저장: ${result.included}장 포함${result.skipped.length ? `, ${result.skipped.length}장 제외` : ''} → ${filename}`;
+    };
+    const blocked = result.skipped.filter((s) => s.needsPermission).length;
+    offerSiteAccess(result.skipped);
+    if (blocked) {
+      // Don't silently save an incomplete PDF: let the user allow access or accept the gap.
+      $('#pdfStatus').textContent = `다른 사이트 이미지 ${blocked}장을 읽을 권한이 없어 PDF를 아직 저장하지 않았습니다.`;
+      const partial = $('#pdfSavePartial');
+      partial.hidden = !result.blob;
+      partial.textContent = `제외하고 저장 (${result.included}장)`;
+      partial.onclick = save;
+      return;
+    }
     if (!result.blob) {
       $('#pdfStatus').textContent = 'PDF를 만들지 못했습니다: 넣을 수 있는 이미지가 없습니다.';
       return;
     }
-    const filename = `${buildFolder(settings, { pageTitle: state.page?.title, url: state.page?.url })}/${sanitizeFilename(title) || 'images'}.pdf`;
-    await savePdf(result.blob, filename);
-    $('#pdfStatus').textContent = `PDF 저장: ${result.included}장 포함${result.skipped.length ? `, ${result.skipped.length}장 제외` : ''} → ${filename}`;
+    await save();
   } catch (e) {
     $('#pdfStatus').textContent = e?.name === 'AbortError' ? 'PDF 만들기를 취소했습니다.' : `PDF를 만들지 못했습니다: ${e?.message || e}`;
   } finally {
@@ -589,6 +605,25 @@ $('#btnPdf').addEventListener('click', async () => {
     render();
   }
 });
+/**
+ * Images on another site (e.g. an image CDN) can only go into a PDF with access
+ * to that site. Offer exactly those origins, not every site.
+ */
+function offerSiteAccess(skipped) {
+  const btn = $('#pdfGrant');
+  const origins = [...new Set(skipped.filter((s) => s.needsPermission).map((s) => { try { return new URL(s.url).origin; } catch { return null; } }).filter(Boolean))];
+  btn.hidden = !origins.length;
+  if (!origins.length) return;
+  btn.textContent = `${origins.map((o) => new URL(o).host).join(', ')} 접근 허용 후 다시 만들기`;
+  btn.onclick = async () => {
+    const granted = await chrome.permissions.request({ origins: origins.map((o) => `${o}/*`) }).catch(() => false);
+    if (!granted) return toast('권한을 허용하지 않아 다른 사이트 이미지는 PDF에 넣을 수 없습니다.');
+    setCredentialPolicy(hostAccessPolicy()); // forget cached "no access" answers
+    btn.hidden = true;
+    $('#btnPdf').click();
+  };
+}
+
 $('#pdfCancel').addEventListener('click', () => {
   if (pdfRunning) pdfAbort?.abort();
   else $('#pdfPanel').hidden = true;

@@ -101,3 +101,11 @@ test('previewFilename ignores query strings and generic names', () => {
   assert.equal(previewFilename('https://a.com/image.php?id=3', 'PNG'), null);
   assert.equal(previewFilename('https://a.com/media/abc123?format=jpg', 'JPEG'), 'abc123.jpg');
 });
+
+test('dots inside titles are not extensions', () => {
+  assert.equal(sanitizeFilename('괴력 난신 - 116화. 조태청(1) : 네이버 웹툰'), '괴력 난신 - 116화. 조태청(1) _ 네이버 웹툰');
+  assert.equal(sanitizeFilename('v1.2 release.PNG'), 'v1.2 release.png');
+  const reg = new NameRegistry();
+  const base = fallbackBaseName('괴력 난신 - 116화. 조태청(1) : 네이버 웹툰', 7);
+  assert.equal(name({ serverName: '', mime: 'image/jpeg', fallbackBase: base, folder: 'F', registry: reg }), '괴력 난신 - 116화. 조태청(1) _ 네이버 웹툰_007.jpg');
+});

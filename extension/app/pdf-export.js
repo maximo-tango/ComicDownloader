@@ -23,7 +23,7 @@ export async function createPdf(sources, { title = '', pageSize = 'image', readV
       const bytes = await readBytes(src.url, readViaPage);
       pages.push(await toPage(bytes));
     } catch (e) {
-      skipped.push({ url: src.url, label: src.label, reason: e?.message || String(e) });
+      skipped.push({ url: src.url, label: src.label, reason: e?.message || String(e), needsPermission: !!e?.needsPermission });
     }
   }
   onProgress(sources.length, sources.length, null);
@@ -48,7 +48,10 @@ async function readBytes(url, readViaPage) {
     const r = await readViaPage(url).catch(() => null);
     if (r?.ok) return dataUrlBytes(r.dataUrl);
   }
-  throw new Error(reason);
+  const err = new Error(reason);
+  // The request itself was refused (CORS), not the server: site access would help.
+  err.needsPermission = !/^서버 응답/.test(reason);
+  throw err;
 }
 
 function dataUrlBytes(dataUrl) {

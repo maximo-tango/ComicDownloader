@@ -26,10 +26,11 @@ export function extForFormat(format) {
   return FORMAT_EXT[format] || null;
 }
 
+/** Splits "name.ext". Only a short alphanumeric tail counts as an extension, so
+ *  "116화. 조태청(1)" stays one name instead of losing everything after the dot. */
 export function splitExt(name) {
-  const i = name.lastIndexOf('.');
-  if (i <= 0 || i === name.length - 1) return [name, ''];
-  return [name.slice(0, i), name.slice(i + 1)];
+  const m = /^(.+)\.([A-Za-z0-9]{1,5})$/.exec(name);
+  return m ? [m[1], m[2]] : [name, ''];
 }
 
 /** Makes a single path segment safe on Windows (and everywhere else). */
