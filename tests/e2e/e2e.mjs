@@ -10,8 +10,9 @@
 // http://localhost:<port> stays without permission, to test that path.
 import puppeteer from 'puppeteer';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startServer, setFile } from '../fixtures/server.mjs';
@@ -51,6 +52,10 @@ mkdirSync(path.join(profile, 'Default'), { recursive: true });
 mkdirSync(downloadDir);
 writeFileSync(path.join(profile, 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: downloadDir, prompt_for_download: false } }));
 
+// Puppeteer is kept away from the service worker: when Chrome restarts a worker
+// that a debugger is attached to, the new instance can stay paused waiting for
+// the debugger, which looks exactly like a hung extension. Real Chrome has no
+// debugger attached, so the suite drives everything through extension pages.
 const browser = await puppeteer.launch({
   headless: true,
   pipe: true,
@@ -58,25 +63,23 @@ const browser = await puppeteer.launch({
   userDataDir: profile,
   args: ['--no-sandbox', '--window-size=1400,1000'],
   defaultViewport: { width: 1400, height: 1000 },
+  targetFilter: (t) => t.type() !== 'service_worker',
 });
-const findWorker = () => browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().endsWith('/background.js'));
-let swTarget = await findWorker();
-const extId = new URL(swTarget.url()).host;
+// Unpacked extension id = first 32 hex digits of sha256(path), digits 0-f mapped to a-p.
+const extId = [...createHash('sha256').update(realpathSync(extPath)).digest('hex').slice(0, 32)].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join('');
+const helper = await browser.newPage(); // extension page used for tab queries and worker control
+await helper.goto(`chrome-extension://${extId}/options/options.html`);
+const ext = (fn, ...args) => helper.evaluate(fn, ...args);
 // The steps below check every format and thumbnail; the shipped defaults
 // (JPG only, thumbnails hidden, scroll on open) get their own step at the end.
 const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false, filterMinWidth: 0, filterMinHeight: 0 };
-// Written from an extension page: right after start-up the worker may not have its APIs yet.
-const setupPage = await browser.newPage();
-await setupPage.goto(`chrome-extension://${extId}/options/options.html`);
-await setupPage.evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
-await setupPage.close();
+await ext((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
 const consoleErrors = [];
 
 async function openSite(p) {
   const page = await browser.newPage();
   await page.goto(SITE + p, { waitUntil: 'load' });
-  const sw = await swTarget.worker();
-  const tabs = await sw.evaluate((u) => chrome.tabs.query({ url: u }), SITE + p.split('?')[0] + '*');
+  const tabs = await ext((u) => chrome.tabs.query({ url: u }), SITE + p.split('?')[0] + '*');
   return { page, tabId: tabs[tabs.length - 1].id };
 }
 async function openApp(query) {
@@ -237,6 +240,8 @@ let olist;
 await step('[11][12] DOM 순서 유지: 파일명 알파벳·해상도 순서와 다름, CSS 배경 섞임', async () => {
   await waitScan(oapp);
   olist = await cards(oapp);
+  const zebra = await oapp.$$eval('#grid .card:first-child .cand option', (o) => o.map((x) => x.textContent));
+  assert.deepEqual(olist.map((c) => c.url.replace(SITE, '/')).slice(0, 1), ['//order/zebra-1200.png'], `zebra candidates: ${JSON.stringify(zebra)} dims ${olist[0]?.dims}`);
   assert.deepEqual(olist.map((c) => c.url.replace(SITE, '/')), ['//order/zebra-1200.png', '//order/bg-mid.png', '//order/apple.png', '//order/mango.png']);
   assert.deepEqual(olist.map((c) => c.seq), ['#1', '#2', '#3', '#4']);
 });
@@ -329,6 +334,11 @@ await step('[19][23] 일괄 다운로드: ImageHunter/페이지 제목/ 폴더, 
   }, 60000, 'downloads');
   const ok = jobs.filter((j) => j.status === 'success');
   const failed = jobs.filter((j) => j.status === 'failed');
+  if (ok.length !== 14) {
+    const chromeSide = await app.evaluate(() => chrome.downloads.search({}).then((l) => l.map((d) => [d.id, d.state, d.error, d.filename.split('/').pop()])));
+    console.log('    [diag] jobs:', JSON.stringify(jobs.map((j) => [j.id, j.status, j.downloadId, j.attempts, j.error, j.filename.split('/').pop()])));
+    console.log('    [diag] chrome:', JSON.stringify(chromeSide));
+  }
   assert.equal(ok.length, 14, JSON.stringify(failed.map((j) => [j.url, j.error])));
   const got = files(MAIN_DIR);
   for (const f of ['plain-large.png', 'a-1920.png', 'b-2x.png', 'pic-large.png', 'bg-hero.png', 'cat.png', 'photo-300x200.png', 'icon-thumb.png', 'server-named.png', 'dup.png', 'lazy-data-src.png', 'data-hd.png', 'lazy-1.png', 'lazy-2.png']) {
@@ -508,12 +518,17 @@ await step('[28] 서비스 워커 재시작: 진행 중 다운로드 상태를 �
   await app.click('#pasteDlAll');
   const job = await until(async () => (await snapshot(app)).find((j) => j.url.endsWith('?restart') && j.status === 'downloading' && j.downloadId != null), 10000, 'downloading');
   await sleep(700); // let the worker persist its state
-  const worker = await swTarget.worker();
-  await worker.close(); // stops the service worker like Chrome does when idle
-  await sleep(300);
+  // Stop the service worker the way Chrome does when it is idle.
+  const cdp = await helper.createCDPSession();
+  const versions = new Map();
+  cdp.on('ServiceWorker.workerVersionUpdated', (e) => e.versions.forEach((v) => versions.set(v.versionId, v)));
+  await cdp.send('ServiceWorker.enable');
+  const running = await until(() => [...versions.values()].find((v) => v.runningStatus === 'running' && v.scriptURL.endsWith('/background.js')), 5000, 'worker version');
+  await cdp.send('ServiceWorker.stopWorker', { versionId: running.versionId });
+  await until(() => versions.get(running.versionId)?.runningStatus === 'stopped', 5000, 'worker stopped');
+  await cdp.detach();
   // Any extension event restarts it; the app page reconnects on its own.
   const done = await until(async () => (await snapshot(app).catch(() => [])).find((j) => j.id === job.id && j.status === 'success'), 30000, 'success after restart');
-  swTarget = await findWorker();
   assert.ok(files(path.join(downloadDir, 'ImageHunter', '재시작')).includes('big.png'));
   await app.click('.tab[data-view="downloads"]');
   await app.waitForFunction((id) => document.querySelector(`#dlTable tr[data-job="${id}"] .st`)?.textContent === '완료', {}, job.id);
@@ -580,7 +595,7 @@ await step('연속 PDF: 주소의 번호를 바꿔 각 페이지를 열고 스�
   await app.$eval('#bUrl', (e, u) => { e.value = u; e.dispatchEvent(new Event('input')); }, `${SITE}/ep?series=7&no=1`);
   assert.equal(await app.$eval('#bParam', (s) => s.value), 'q:no', 'episode-like parameter preselected');
   await app.$eval('#bEnd', (e) => { e.value = '4'; e.dispatchEvent(new Event('input')); });
-  assert.match(await app.$eval('#bPreview', (e) => e.textContent), /^4개 주소: .*no=1 … .*no=4$/);
+  assert.match(await app.$eval('#bPreview', (e) => e.textContent), /^4개 주소: .*no=1 … .*no=4 \(없는 주소는 확인 후 건너뜀\)$/);
   // fixtures are PNG; the requested size filter: width ≥ 500, height ≥ 400
   await app.$eval('#bJpg', (e) => (e.checked = false));
   await app.$eval('#bMinW', (e) => (e.value = '500'));
@@ -588,9 +603,10 @@ await step('연속 PDF: 주소의 번호를 바꿔 각 페이지를 열고 스�
   await app.$eval('#bDelay', (e) => (e.value = '0'));
   await app.$eval('#bFolder', (e) => (e.value = '연속'));
   await app.click('#bRun');
-  await app.waitForFunction(() => /완료 3 · 건너뜀 1 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 });
+  await app.waitForFunction(() => /확인 4 \/ 4 · 완료 3 · 없음 1 · 건너뜀 0 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 });
   const rows = await app.$$eval('#bTable tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
-  assert.deepEqual(rows.map((r) => [r[0], r[2], r[3]]), [['1', '완료', '3장 / 찾은 4장'], ['2', '완료', '3장 / 찾은 4장'], ['3', '완료', '3장 / 찾은 4장'], ['4', '건너뜀', '0장 / 찾은 0장']]);
+  // the unpublished episode 4 ("아직 공개되지 않았습니다") is recognised as missing before opening a tab
+  assert.deepEqual(rows.map((r) => [r[0], r[2], r[3]]), [['1', '완료', '3장 / 찾은 4장'], ['2', '완료', '3장 / 찾은 4장'], ['3', '완료', '3장 / 찾은 4장'], ['4', '없음', '']]);
   const dir = path.join(downloadDir, 'ImageHunter', '연속');
   await until(() => files(dir).length === 3, 20000, 'batch pdfs');
   assert.deepEqual(files(dir), ['에피소드 1.pdf', '에피소드 2.pdf', '에피소드 3.pdf']);
@@ -598,12 +614,51 @@ await step('연속 PDF: 주소의 번호를 바꿔 각 페이지를 열고 스�
   const imgs = [...text.matchAll(/\/Subtype \/Image \/Width (\d+) \/Height (\d+)/g)].map((m) => `${m[1]}x${m[2]}`);
   assert.deepEqual(imgs, ['690x950', '690x900', '690x850'], 'strips in page order, scrolled-in strip included, banner filtered out');
   assert.equal((text.match(/\/Type \/Page /g) || []).length, 1, 'joined without gaps');
-  const left = await (await swTarget.worker()).evaluate((u) => chrome.tabs.query({ url: u }).then((t) => t.length), `${SITE}/ep*`);
+  const left = await ext((u) => chrome.tabs.query({ url: u }).then((t) => t.length), `${SITE}/ep*`);
   assert.equal(left, 0, 'opened tabs are closed again');
 });
 
+await step('연속 PDF: 중간에 없는 주소는 확인 후 건너뜀, 범위 제한 없음, 끝 번호 없이 실행', async () => {
+  await app.bringToFront(); // background tabs don't run requestAnimationFrame
+  await app.$eval('#bUrl', (e, u) => { e.value = u; e.dispatchEvent(new Event('input')); }, `${SITE}/wt/500/1001`);
+  assert.equal(await app.$eval('#bParam', (s) => s.selectedOptions[0].textContent), '경로의 1001 (/1001/)', 'last path number preselected');
+  const setv = (sel, v) => app.$eval(sel, (e, x) => { e.value = x; e.dispatchEvent(new Event('input')); }, v);
+  await app.waitForFunction(() => !document.querySelector('#bRun').disabled);
+  await setv('#bStart', '1000');
+  await setv('#bEnd', '1010');
+  await app.$eval('#bFolder', (e) => (e.value = '듬성'));
+  await app.click('#bRun');
+  await app.waitForFunction(() => /확인 11 \/ 11 · 완료 3 · 없음 8 · 건너뜀 0 · 실패 0 · 남음 0/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 }).catch(async (e) => {
+    const rows = await app.$$eval('#bTable tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent).join(' | ')));
+    const extra = await app.evaluate(() => ({ toast: document.querySelector('#toast').textContent, run: document.querySelector('#bRun').disabled, preview: document.querySelector('#bPreview').textContent, param: document.querySelector('#bParam').value, start: document.querySelector('#bStart').value, end: document.querySelector('#bEnd').value }));
+    throw new Error(`${e.message}\nsummary: ${await app.$eval('#bSummary', (x) => x.textContent)}\n${JSON.stringify(extra)}\n${rows.join('\n')}`);
+  });
+  // Missing addresses are hidden from the table by default
+  const visible = await app.$$eval('#bTable tbody tr:not([hidden])', (trs) => trs.map((tr) => tr.children[0].textContent));
+  assert.deepEqual(visible, ['1001', '1004', '1009']);
+  await app.click('#bShowMissing');
+  const reasons = await app.$$eval('#bTable tbody tr', (trs) => Object.fromEntries(trs.map((tr) => [tr.children[0].textContent, tr.children[5].textContent])));
+  // id % 3: 0 → redirect to the list, 1 → 404, 2 → 200 page saying "not found"
+  assert.match(reasons['1002'], /^다른 페이지로 이동됨 \(127\.0\.0\.1:\d+\/wt\/500\/list\)$/);
+  assert.equal(reasons['1003'], 'HTTP 404');
+  assert.match(reasons['1007'], /^페이지 내용: 요청하신 페이지를 찾을 수 없습니다/);
+  await app.click('#bShowMissing');
+  assert.deepEqual(files(path.join(downloadDir, 'ImageHunter', '듬성')), ['웹툰 1001.pdf', '웹툰 1004.pdf', '웹툰 1009.pdf']);
+
+  // No end number: keeps going until 3 missing addresses in a row.
+  await setv('#bStart', '1008');
+  await setv('#bEnd', '');
+  await setv('#bStopAfter', '3');
+  assert.match(await app.$eval('#bPreview', (e) => e.textContent), /^끝 번호 없음: .*\/1008부터 시작해, 없는 주소가 3번 연달아 나오면 멈춥니다\.$/);
+  await app.$eval('#bFolder', (e) => (e.value = '끝없음'));
+  await app.click('#bRun');
+  await app.waitForFunction(() => !document.querySelector('#bRun').disabled && /확인 5 · 완료 1 · 없음 4/.test(document.querySelector('#bSummary').textContent), { timeout: 120000 });
+  assert.deepEqual(files(path.join(downloadDir, 'ImageHunter', '끝없음')), ['웹툰 1009.pdf']);
+  assert.match(await app.$eval('#toast', (e) => e.textContent), /없는 주소 3번 연속 — 끝으로 판단/);
+});
+
 await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 스크롤', async () => {
-  await (await swTarget.worker()).evaluate(() => chrome.storage.local.remove('settings'));
+  await ext(() => chrome.storage.local.remove('settings'));
   const site2 = await openSite('/?defaults');
   const dapp = await openApp(`tabId=${site2.tabId}`);
   await dapp.bringToFront();
@@ -620,7 +675,7 @@ await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 �
   assert.equal(await dapp.$eval('#bJpg', (e) => e.checked), true);
   await dapp.close();
   await site2.page.close();
-  await (await swTarget.worker()).evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
+  await ext((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
 });
 
 await step('팝업·설정 화면 동작 및 콘솔 오류 없음', async () => {

@@ -11,11 +11,12 @@ import { applyFilters, DEFAULT_FILTERS } from '../lib/filters.js';
 import { dedupeInOrder } from '../lib/ordering.js';
 import { urlKey } from '../lib/url-utils.js';
 import { buildFolder, sanitizeFilename } from '../lib/filename.js';
-import { buildSeries, findNumericParams } from '../lib/batch.js';
+import { findNumericParams, makeSeries, notFoundReason } from '../lib/batch.js';
 
 const STEP = {
   waiting: '대기', opening: '페이지 여는 중', scrolling: '스크롤하며 이미지 불러오는 중', analyzing: '원본 확인 중',
   pdf: 'PDF 만드는 중', done: '완료', skipped: '건너뜀', failed: '실패', stopped: '중지됨', permission: '권한 필요',
+  checking: '있는 페이지인지 확인 중', notfound: '없음',
 };
 
 export function initBatchView({ getSettings }) {
@@ -50,12 +51,16 @@ export function initBatchView({ getSettings }) {
   function series() {
     const p = currentParam();
     if (!p) throw new Error('바꿀 부분을 고르세요.');
-    return buildSeries($('#bUrl').value.trim(), p, $('#bStart').value, $('#bEnd').value, $('#bStep').value || 1);
+    return makeSeries($('#bUrl').value.trim(), p, $('#bStart').value, $('#bEnd').value.trim(), $('#bStep').value || 1);
   }
   function preview() {
     try {
-      const list = series();
-      $('#bPreview').textContent = `${list.length}개 주소: ${list[0].url}${list.length > 1 ? ` … ${list.at(-1).url}` : ''}`;
+      const sr = series();
+      const first = sr.at(0).url;
+      $('#bPreview').textContent =
+        sr.count == null
+          ? `끝 번호 없음: ${first}부터 시작해, 없는 주소가 ${$('#bStopAfter').value || 10}번 연달아 나오면 멈춥니다.`
+          : `${sr.count.toLocaleString()}개 주소: ${first}${sr.count > 1 ? ` … ${sr.at(sr.count - 1).url}` : ''} (없는 주소는 확인 후 건너뜀)`;
       $('#bPreview').classList.remove('error');
     } catch (e) {
       $('#bPreview').textContent = $('#bUrl').value.trim() ? e.message : '';
@@ -68,14 +73,17 @@ export function initBatchView({ getSettings }) {
     if (p) $('#bStart').value = $('#bEnd').value = Number(p.value);
     preview();
   });
-  for (const id of ['bStart', 'bEnd', 'bStep']) $('#' + id).addEventListener('input', preview);
+  for (const id of ['bStart', 'bEnd', 'bStep', 'bStopAfter']) $('#' + id).addEventListener('input', preview);
+  $('#bShowMissing').addEventListener('change', () => rows.forEach(renderRow));
 
   // ---- table --------------------------------------------------------------
   function renderRow(r) {
+    // Missing addresses can be the majority of a sparse range: hidden unless asked for.
+    r.tr.hidden = r.step === 'notfound' && !$('#bShowMissing').checked;
     r.tr.replaceChildren(
       h('td', {}, String(r.n)),
       h('td', { class: 'url', title: r.url }, r.title || r.url),
-      h('td', {}, h('span', { class: `st ${r.step === 'done' ? 'success' : r.step === 'failed' ? 'failed' : r.step === 'skipped' || r.step === 'stopped' ? 'cancelled' : 'downloading'}` }, STEP[r.step])),
+      h('td', {}, h('span', { class: `st ${r.step === 'done' ? 'success' : r.step === 'failed' ? 'failed' : ['skipped', 'stopped', 'notfound'].includes(r.step) ? 'cancelled' : r.step === 'waiting' ? 'pending' : 'downloading'}` }, STEP[r.step])),
       h('td', {}, r.images == null ? '' : `${r.images}장${r.found != null ? ` / 찾은 ${r.found}장` : ''}`),
       h('td', { class: 'url', title: r.file || '' }, r.file ? r.file.split('/').pop() : ''),
       h('td', { class: 'err' }, r.error || ''),
@@ -86,9 +94,13 @@ export function initBatchView({ getSettings }) {
     renderRow(r);
     summary();
   };
+  let total = null; // series length (null = open-ended)
   function summary() {
     const c = (st) => rows.filter((r) => r.step === st).length;
-    $('#bSummary').textContent = rows.length ? `전체 ${rows.length} · 완료 ${c('done')} · 건너뜀 ${c('skipped')} · 실패 ${c('failed')} · 남음 ${c('waiting')}` : '';
+    const left = total == null ? '' : ` · 남음 ${Math.max(0, total - rows.length) + c('waiting')}`;
+    $('#bSummary').textContent = rows.length
+      ? `확인 ${rows.length}${total == null ? '' : ` / ${total}`} · 완료 ${c('done')} · 없음 ${c('notfound')} · 건너뜀 ${c('skipped')} · 실패 ${c('failed')}${left}`
+      : '';
   }
 
   // ---- run ----------------------------------------------------------------
@@ -162,13 +174,41 @@ export function initBatchView({ getSettings }) {
     });
   }
 
+  /**
+   * Cheap check before opening a tab: one request for the page itself.
+   * @returns reason when the address doesn't exist, '' when it does or we can't tell
+   */
+  async function precheck(url, param) {
+    try {
+      const resp = await fetch(url, { credentials: 'include', redirect: 'follow' });
+      let title = '';
+      let bodyText = null;
+      if (/html/i.test(resp.headers.get('content-type') || '')) {
+        const doc = new DOMParser().parseFromString((await resp.text()).slice(0, 500000), 'text/html');
+        doc.querySelectorAll('script, style, noscript, template').forEach((e) => e.remove());
+        title = doc.title || '';
+        bodyText = doc.body?.textContent ?? '';
+      }
+      return notFoundReason({ status: resp.status, requestedUrl: url, finalUrl: resp.url, param, title, bodyText });
+    } catch {
+      return ''; // network/CORS trouble: open the page and look
+    }
+  }
+
   async function processRow(r, ctx) {
     const settings = getSettings();
     let tabId = null;
     try {
-      set(r, { step: 'opening', error: '' });
+      set(r, { step: 'checking', error: '' });
+      const absent = await precheck(r.url, ctx.param);
+      if (absent) return set(r, { step: 'notfound', error: absent });
+      set(r, { step: 'opening' });
       tabId = await openTab(r.url);
       await wait(800);
+      // Pages that say "not found" only after scripts run, or redirect by script.
+      const [{ result: here }] = await chrome.scripting.executeScript({ target: { tabId }, func: () => ({ url: location.href, title: document.title, text: (document.body?.innerText || '').slice(0, 2000) }) });
+      const late = notFoundReason({ requestedUrl: r.url, finalUrl: here.url, param: ctx.param, title: here.title, bodyText: here.text });
+      if (late) return set(r, { step: 'notfound', title: here.title, error: late });
       if (stop) return set(r, { step: 'stopped' });
       if ($('#bScroll').checked) {
         set(r, { step: 'scrolling' });
@@ -211,49 +251,81 @@ export function initBatchView({ getSettings }) {
     }
   }
 
-  async function run(list) {
+  /**
+   * Processes the series one address at a time. `source` is either a lazy
+   * series (rows created as we go) or an array of existing rows (retry).
+   */
+  async function run(source) {
     running = true;
     stop = false;
-    $('#bStart').disabled = $('#bRun').disabled = true;
+    $('#bRun').disabled = $('#bRetry').disabled = true;
     $('#bStop').disabled = false;
-    const ctx = { probe: createProber({ decode: decodeWithImage, concurrency: 8 }), filters: currentFilters() };
+    const ctx = { probe: createProber({ decode: decodeWithImage, concurrency: 8 }), filters: currentFilters(), param: currentParam() };
     setCredentialPolicy(hostAccessPolicy());
+    const stopAfter = Math.max(1, Number($('#bStopAfter').value) || 10);
+    let misses = 0;
+    let endedBy = '';
     try {
-      for (const r of list) {
+      for (let i = 0; ; i++) {
+        let r;
+        if (Array.isArray(source)) {
+          r = source[i];
+          if (!r) break;
+        } else {
+          const next = source.at(i);
+          if (!next) break;
+          r = { ...next, step: 'waiting', tr: h('tr') };
+          rows.push(r);
+          tbody.append(r.tr);
+          renderRow(r);
+        }
         if (stop) {
           set(r, { step: 'stopped' });
-          continue;
+          endedBy = '중지됨';
+          break;
         }
         await processRow(r, ctx);
-        if (r !== list.at(-1) && !stop) await wait(Math.max(0, Number($('#bDelay').value) || 0) * 1000); // be gentle with the site
+        const miss = r.step === 'notfound' || (r.step === 'skipped' && !r.images);
+        misses = miss ? misses + 1 : 0;
+        // Open-ended series end after a run of missing addresses.
+        if (!Array.isArray(source) && source.count == null && misses >= stopAfter) {
+          endedBy = `없는 주소 ${misses}번 연속 — 끝으로 판단`;
+          break;
+        }
+        if (stop) continue;
+        const last = Array.isArray(source) ? i === source.length - 1 : source.count != null && i === source.count - 1;
+        if (last) break;
+        // Gentle on the site: a short pause after a missing address, the configured one after a real page.
+        await wait(r.step === 'notfound' ? 300 : Math.max(0, Number($('#bDelay').value) || 0) * 1000);
       }
     } finally {
       running = false;
-      $('#bStart').disabled = $('#bRun').disabled = false;
+      $('#bRun').disabled = $('#bRetry').disabled = false;
       $('#bStop').disabled = true;
+      summary();
       const done = rows.filter((r) => r.step === 'done').length;
-      toast(`연속 PDF: ${done}개 저장${stop ? ' (중지됨)' : ''}`, 4000);
+      toast(`연속 PDF: ${done}개 저장${endedBy ? ` (${endedBy})` : ''}`, 5000);
     }
   }
 
   $('#bRun').addEventListener('click', async () => {
-    if (running) return;
-    let list;
+    if (running) return toast('이미 진행 중입니다. 끝나거나 중지한 뒤 다시 시작하세요.');
+    let sr;
     try {
-      list = series();
+      sr = series();
     } catch (e) {
       return toast(e.message);
     }
     // Opening tabs by itself needs access to that site (activeTab covers only a tab the user opened the menu on).
-    const origin = new URL(list[0].url).origin;
+    const origin = new URL(sr.at(0).url).origin;
     const granted = await chrome.permissions.request({ origins: [`${origin}/*`] }).catch(() => false);
     if (!granted) return toast(`${new URL(origin).host} 접근을 허용해야 페이지를 자동으로 열 수 있습니다.`, 4000);
-    rows = list.map((x) => ({ ...x, step: 'waiting', tr: h('tr') }));
-    rows.forEach(renderRow);
-    tbody.replaceChildren(...rows.map((r) => r.tr));
+    rows = [];
+    total = sr.count;
+    tbody.replaceChildren();
     $('#bTable').hidden = false;
     summary();
-    run(rows);
+    run(sr);
   });
   $('#bStop').addEventListener('click', () => {
     stop = true;
@@ -262,7 +334,7 @@ export function initBatchView({ getSettings }) {
   $('#bRetry').addEventListener('click', () => {
     if (running) return;
     const again = rows.filter((r) => ['failed', 'stopped', 'skipped'].includes(r.step));
-    if (!again.length) return toast('다시 할 항목이 없습니다.');
+    if (!again.length) return toast('다시 할 항목이 없습니다. (없는 주소는 다시 하지 않습니다)');
     again.forEach((r) => set(r, { step: 'waiting', error: '' }));
     run(again);
   });

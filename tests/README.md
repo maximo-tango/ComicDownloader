@@ -22,6 +22,8 @@ npm run test:e2e       # 확장 프로그램 전체를 실제 Chrome에서 실�
 | `extractor.test.js` | 실제 Chrome 페이지에서 수집기 실행: DOM 순서, srcset·sizes·data-*, 잘못된 URL, 페이지 DOM 무변경, Shadow DOM, 자동 스크롤 제한 | Chrome (headless) |
 | `e2e/e2e.mjs` | 확장 프로그램 전체: 목록 UI, 필터, 선택, 재검색, PDF, 다운로드·재시도·취소, 내보내기, URL 입력, 탭 이동, 서비스 워커 재시작, 1000장 성능 | Chrome (headless) |
 
+E2E는 서비스 워커에 디버거를 붙이지 않습니다(`targetFilter`). 디버거가 붙은 워커는 Chrome이 다시 시작할 때 멈춘 채 남을 수 있어, 실제로는 없는 "응답 없음" 문제가 생기기 때문입니다. 확장 ID는 경로로 계산하고, 탭 조회와 저장소 설정은 확장 페이지에서 합니다.
+
 E2E는 Puppeteer가 툴바 버튼을 누를 수 없어서 `activeTab` 권한 부여를 재현할 수 없습니다. 그래서 테스트용 사본의 manifest에만 `http://127.0.0.1/*` 권한을 추가합니다. 이 권한은 그 페이지에서 메뉴를 열었을 때 activeTab이 주는 접근 범위와 같습니다. 두 번째 출처(`http://localhost`)는 권한 없이 두어, 권한이 없을 때의 동작(크기 "확인 불가", PDF 제외)도 확인합니다.
 
 ## 수동 테스트 (실제 Chrome / Windows 11)

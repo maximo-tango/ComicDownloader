@@ -119,7 +119,7 @@
         <label class="field grow"><span>주소</span><input id="bUrl" type="url" placeholder="회차 하나의 주소를 붙여넣으세요 (예: …detail?titleId=…&amp;no=116)"></label>
         <label class="field"><span>바꿀 부분</span><select id="bParam"><option value="">주소를 먼저 입력하세요</option></select></label>
         <label class="field"><span>시작</span><input id="bStart" type="number" min="0"></label>
-        <label class="field"><span>끝</span><input id="bEnd" type="number" min="0"></label>
+        <label class="field" title="비워두면 끝 번호 없이 계속 진행합니다"><span>끝</span><input id="bEnd" type="number" min="0" placeholder="비우면 계속"></label>
         <label class="field"><span>간격</span><input id="bStep" type="number" min="1" value="1"></label>
         <div id="bPreview" class="status-line"></div>
       </div>
@@ -132,6 +132,8 @@
         <label class="field"><span>PDF 구성</span><select id="bLayout"><option value="continuous">이어 붙이기</option><option value="page">이미지마다 한 쪽</option><option value="a4">A4</option></select></label>
         <label class="field"><span>하위 폴더</span><input id="bFolder" type="text" placeholder="(선택)" maxlength="80"></label>
         <label class="field" title="사이트에 부담을 주지 않도록 페이지 사이에 기다리는 시간"><span>페이지 사이 대기</span><input id="bDelay" type="number" min="0" max="60" value="2"> 초</label>
+        <label class="field" title="끝 번호를 비웠을 때, 없는 주소가 이만큼 연달아 나오면 멈춥니다"><span>없는 주소 연속</span><input id="bStopAfter" type="number" min="1" max="10000" value="10"> 번이면 멈춤</label>
+        <label class="check"><input id="bShowMissing" type="checkbox"> 없는 주소도 표에 표시</label>
         <div class="spacer"></div>
         <button id="bRetry" class="btn small">실패·건너뜀 다시</button>
         <button id="bStop" class="btn small" disabled>중지</button>

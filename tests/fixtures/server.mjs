@@ -101,9 +101,9 @@ function imageSpec(pathname) {
 }
 
 // Episodes 1-3 exist; later numbers are "not published yet" (no images).
-function episodePage(n) {
+function episodePage(n, title = `에피소드 ${n}`) {
   if (n < 1 || n > 3) return `<!doctype html><meta charset="utf-8"><title>없는 회차</title><p>아직 공개되지 않았습니다.</p>`;
-  return `<!doctype html><meta charset="utf-8"><title>에피소드 ${n}</title>
+  return `<!doctype html><meta charset="utf-8"><title>${title}</title>
 <img src="/ep/banner.png" alt="banner">
 <img src="/ep/${n}/1.png" style="width:690px"><img src="/ep/${n}/2.png" style="width:690px">
 <div style="height:3000px"></div><div id="lazy"></div>
@@ -133,6 +133,24 @@ export function startServer(port = 8765) {
     if (path === '/' || path === '/index.html') return html(res, page('test-page.html'));
     if (path === '/order') return html(res, page('order-page.html'));
     if (path === '/ep') return html(res, episodePage(Number(url.searchParams.get('no')) || 0));
+    // Sparse series by path: /wt/500/<id>. Only 1001, 1004 and 1009 exist; the rest are
+    // missing in three different ways (404, redirect to the list, 200 "not found" page).
+    const wt = /^\/wt\/500\/(\d+)$/.exec(path);
+    if (wt) {
+      const id = Number(wt[1]);
+      const exists = { 1001: 1, 1004: 2, 1009: 3 }[id];
+      if (exists) return html(res, episodePage(exists, `웹툰 ${id}`));
+      if (id % 3 === 0) {
+        res.writeHead(302, { location: '/wt/500/list' });
+        return res.end();
+      }
+      if (id % 3 === 1) {
+        res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end('<!doctype html><title>404</title>');
+      }
+      return html(res, '<!doctype html><meta charset="utf-8"><title>알림</title><p>요청하신 페이지를 찾을 수 없습니다.</p>');
+    }
+    if (path === '/wt/500/list') return html(res, '<!doctype html><meta charset="utf-8"><title>작품 목록</title><ul><li>목록</li></ul>');
     if (path === '/many') return html(res, manyPage(Math.min(5000, Number(url.searchParams.get('n')) || 1000)));
     if (path === '/webtoon/1') return html(res, '<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');
     if (extraPages.has(path)) return html(res, extraPages.get(path));
