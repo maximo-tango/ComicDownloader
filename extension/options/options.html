@@ -27,12 +27,17 @@
 
       <h2>다운로드</h2>
       <label class="field"><span>동시 다운로드 수 (1~8)</span><input name="concurrency" type="number" min="1" max="8"></label>
-      <label class="field"><span>PDF 페이지 크기</span>
-        <select name="pdfPageSize">
-          <option value="image">이미지 크기 그대로</option>
-          <option value="a4">A4에 맞춤</option>
+      <label class="field"><span>PDF 구성</span>
+        <select name="pdfLayout">
+          <option value="continuous">이미지 이어 붙이기 (빈틈 없음, 웹툰용)</option>
+          <option value="page">이미지마다 한 쪽</option>
+          <option value="a4">이미지마다 A4 한 쪽</option>
         </select></label>
 
+      <h2>이미지 목록을 열 때</h2>
+      <label class="check"><input name="scrollOnOpen" type="checkbox"> 처음 검색할 때 스크롤하며 추가 검색까지 하기</label>
+      <label class="check"><input name="filterNoThumb" type="checkbox"> "썸네일 의심 제외" 켜기</label>
+      <label class="check"><input name="jpgOnly" type="checkbox"> 확장자 필터를 JPG만 켜기 (끄면 모든 형식)</label>
       <h2>이미지 목록</h2>
       <label class="field"><span>기본 미리보기 크기</span>
         <select name="previewSize"><option value="small">작게</option><option value="medium">중간</option><option value="large">크게</option></select></label>

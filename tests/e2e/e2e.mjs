@@ -62,6 +62,10 @@ const browser = await puppeteer.launch({
 const findWorker = () => browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().endsWith('/background.js'));
 let swTarget = await findWorker();
 const extId = new URL(swTarget.url()).host;
+// The steps below check every format and thumbnail; the shipped defaults
+// (JPG only, thumbnails hidden, scroll on open) get their own step at the end.
+const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false };
+await (await swTarget.worker()).evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
 const consoleErrors = [];
 
 async function openSite(p) {
@@ -254,7 +258,7 @@ await step('[14] 해상도 필터 후 상대 순서 유지, 숨겨진 선택 보
   await oapp.waitForFunction(() => /표시 3개/.test(document.querySelector('#countLine').textContent));
   const f = await cards(oapp);
   assert.deepEqual(f.map((c) => c.seq), ['#1', '#2', '#4']);
-  assert.match(await countLine(oapp), /선택 1개 \(필터로 숨겨진 선택 1개 유지\)/);
+  assert.match(await countLine(oapp), /선택 0개 \(필터로 숨겨진 선택 1개는 보관만 하고 다운로드·PDF에서 제외\)/);
   await oapp.type('#fMinW', '-'); // "700-" → invalid
   await oapp.$eval('#fMinW', (e) => { e.value = '-5'; e.dispatchEvent(new Event('input')); });
   await oapp.waitForFunction(() => /0 이상/.test(document.querySelector('#filterError').textContent));
@@ -286,7 +290,8 @@ await step('PDF로 저장: 선택 순서(페이지 순서) 그대로 한 파일'
   await until(() => existsSync(pdfPath), 20000, 'pdf file');
   const text = readFileSync(pdfPath).toString('latin1');
   assert.ok(text.startsWith('%PDF-1.4'));
-  assert.equal((text.match(/\/Type \/Page /g) || []).length, 5);
+  // continuous layout: all five joined on one page (total height 5300pt < 14400pt)
+  assert.equal((text.match(/\/Type \/Page /g) || []).length, 1);
   const widths = [...text.matchAll(/\/Subtype \/Image \/Width (\d+)/g)].map((m) => Number(m[1]));
   assert.deepEqual(widths, [1200, 900, 600, 700, 4000]);
   await oapp.click('#btnSelectNone');
@@ -294,6 +299,22 @@ await step('PDF로 저장: 선택 순서(페이지 순서) 그대로 한 파일'
 });
 
 // ===========================================================================
+await step('필터로 숨겨진 선택은 PDF·다운로드에서 제외', async () => {
+  await oapp.bringToFront(); // background tabs don't run requestAnimationFrame
+  await oapp.click('#btnSelectAll');
+  await oapp.type('#fMinW', '700'); // hides apple (600) and kiwi (700 → shown) … leaves zebra, bg, kiwi, mango
+  await oapp.waitForFunction(() => /필터로 숨겨진 선택 1개는 보관만 하고/.test(document.querySelector('#countLine').textContent));
+  assert.match(await oapp.$eval('#btnPdf', (b) => b.textContent), /PDF로 저장 \(4\)/);
+  await oapp.click('#btnPdf');
+  await oapp.waitForFunction(() => /PDF 저장: 4장 포함/.test(document.querySelector('#pdfStatus').textContent), { timeout: 60000 });
+  const pdfPath = path.join(ORDER_DIR, '순서 테스트 (1).pdf');
+  await until(() => existsSync(pdfPath), 20000, 'second pdf');
+  const widths = [...readFileSync(pdfPath).toString('latin1').matchAll(/\/Subtype \/Image \/Width (\d+)/g)].map((m) => Number(m[1]));
+  assert.deepEqual(widths, [1200, 900, 700, 4000], 'apple (hidden by the filter) is not in the PDF');
+  await oapp.$eval('#fMinW', (e) => { e.value = ''; e.dispatchEvent(new Event('input')); });
+  await oapp.click('#btnSelectNone');
+});
+
 await step('[19][23] 일괄 다운로드: ImageHunter/페이지 제목/ 폴더, 서버 파일명, 진행 상태', async () => {
   await app.bringToFront(); // background tabs don't run requestAnimationFrame
   await app.click('#btnSelectAll');
@@ -547,6 +568,23 @@ await step('[18] 이미지 1000장 페이지 성능', async () => {
   await mapp.close();
   await many.page.close();
   return `검색+판별 ${(tScan / 1000).toFixed(1)}초, 전체 선택·필터·크기 변경 ${tUi} ms`;
+});
+
+await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 스크롤', async () => {
+  await (await swTarget.worker()).evaluate(() => chrome.storage.local.remove('settings'));
+  const site2 = await openSite('/?defaults');
+  const dapp = await openApp(`tabId=${site2.tabId}`);
+  await dapp.bringToFront();
+  await waitScan(dapp, 90000);
+  const status = await dapp.$eval('#scanStatus', (e) => e.textContent);
+  assert.match(status, /화면까지 확인함|페이지 끝까지 확인함/, 'first search scrolled the page: ' + status);
+  assert.match(status, /이미지 19개/, 'lazy images found on the first search');
+  assert.equal(await dapp.$eval('#fNoThumb', (e) => e.checked), true);
+  const on = await dapp.$$eval('#fFormats .chip.on', (l) => l.map((c) => c.textContent));
+  assert.deepEqual(on, ['JPG']);
+  await dapp.close();
+  await site2.page.close();
+  await (await swTarget.worker()).evaluate((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
 });
 
 await step('팝업·설정 화면 동작 및 콘솔 오류 없음', async () => {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { parseCsvLine, resultRows, toCsv, toJson } from '../extension/lib/export.js';
-import { buildPdf, layout } from '../extension/lib/pdf.js';
+import { buildPdf, pageLayout, planPages } from '../extension/lib/pdf.js';
 import { jpegDetails } from '../extension/lib/image-header.js';
 import { jpegHeader } from './helpers.js';
 
@@ -58,7 +58,7 @@ test('PDF: pages in the given order, JPEG passed through, others lossless', () =
       { kind: 'jpeg', data: jpeg, width: 640, height: 480, components: 3 },
       { kind: 'flate', data: deflateSync(rgb), width: 3, height: 2 },
     ],
-    { title: '웹툰 1화' },
+    { title: '웹툰 1화', layout: 'page' },
   );
   const bytes = Buffer.concat(chunks.map((c) => Buffer.from(c)));
   const pdf = readPdf(bytes);
@@ -71,15 +71,48 @@ test('PDF: pages in the given order, JPEG passed through, others lossless', () =
   assert.match(pdf.text, /\/Title <feffc6f9/); // "웹" = U+C6F9, UTF-16BE with BOM
 });
 
-test('PDF page layout', () => {
-  assert.deepEqual(layout(800, 600, 'image'), [800, 600, 0, 0, 800, 600]);
-  const [pw, ph] = layout(800, 40000, 'image'); // long webtoon strip: scaled to the 14400pt limit
+test('PDF page layout (one image per page)', () => {
+  assert.deepEqual(pageLayout(800, 600, 'image'), [800, 600, 0, 0, 800, 600]);
+  const [pw, ph] = pageLayout(800, 40000, 'image'); // long webtoon strip: scaled to the 14400pt limit
   assert.equal(ph, 14400);
   assert.ok(Math.abs(pw - 288) < 0.01);
-  const a4 = layout(1000, 2000, 'a4');
+  const a4 = pageLayout(1000, 2000, 'a4');
   assert.deepEqual(a4.slice(0, 2), [595.28, 841.89]);
-  const land = layout(2000, 1000, 'a4');
+  const land = pageLayout(2000, 1000, 'a4');
   assert.deepEqual(land.slice(0, 2), [841.89, 595.28]);
+});
+
+test('continuous layout: images joined with no gap, pages break only between images', () => {
+  const strip = { width: 690, height: 1600 };
+  const pages = planPages(Array(20).fill(strip), 'continuous');
+  // 14400 / 1600 = 9 strips per page → 9 + 9 + 2
+  assert.deepEqual(pages.map((p) => p.items.length), [9, 9, 2]);
+  assert.deepEqual(pages.map((p) => p.height), [14400, 14400, 3200]);
+  for (const p of pages) {
+    assert.equal(p.width, 690);
+    p.items.forEach((it, k) => assert.equal(it.y, k * 1600, 'no gap between images'));
+  }
+  assert.deepEqual(pages.flatMap((p) => p.items.map((i) => i.index)), [...Array(20).keys()], 'page order kept');
+});
+
+test('continuous layout: narrower images are centred, too-tall ones get their own page', () => {
+  const pages = planPages([{ width: 690, height: 1000 }, { width: 300, height: 100 }, { width: 690, height: 30000 }, { width: 690, height: 500 }], 'continuous');
+  assert.deepEqual(pages.map((p) => p.items.map((i) => i.index)), [[0, 1], [2], [3]]);
+  assert.equal(pages[0].items[1].x, 195);
+  assert.equal(pages[1].height, 14400);
+  assert.ok(pages[1].items[0].w < 690);
+});
+
+test('continuous PDF: one page, images stacked top-down with seam overlap', () => {
+  const jpeg = jpegHeader(100, 50);
+  const bytes = Buffer.concat(buildPdf([
+    { kind: 'jpeg', data: jpeg, width: 100, height: 50, components: 3 },
+    { kind: 'jpeg', data: jpeg, width: 100, height: 50, components: 3 },
+  ], { layout: 'continuous' }).map((c) => Buffer.from(c)));
+  const pdf = readPdf(bytes);
+  assert.equal(pdf.pages, 1);
+  assert.match(pdf.text, /\/MediaBox \[0 0 100 100\]/);
+  assert.match(pdf.text, /q 100 0 0 50.5 0 49.5 cm \/Im0 Do Q\nq 100 0 0 50 0 0 cm \/Im1 Do Q/);
 });
 
 test('jpegDetails reports stored size, components and orientation', () => {

@@ -12,7 +12,7 @@ import { fetchWithFallback } from '../lib/probe.js';
  * @param readViaPage  optional async (url) => { ok, dataUrl, error } using the source page
  * @returns {{ blob, included: number, skipped: { url, label, reason }[] }}
  */
-export async function createPdf(sources, { title = '', pageSize = 'image', readViaPage = null, onProgress = () => {}, signal } = {}) {
+export async function createPdf(sources, { title = '', layout = 'continuous', readViaPage = null, onProgress = () => {}, signal } = {}) {
   const pages = [];
   const skipped = [];
   for (let i = 0; i < sources.length; i++) {
@@ -28,7 +28,7 @@ export async function createPdf(sources, { title = '', pageSize = 'image', readV
   }
   onProgress(sources.length, sources.length, null);
   if (!pages.length) return { blob: null, included: 0, skipped };
-  const blob = new Blob(buildPdf(pages, { pageSize, title }), { type: 'application/pdf' });
+  const blob = new Blob(buildPdf(pages, { layout, title }), { type: 'application/pdf' });
   return { blob, included: pages.length, skipped };
 }
 
@@ -58,7 +58,13 @@ function dataUrlBytes(dataUrl) {
   const i = dataUrl.indexOf(',');
   const meta = dataUrl.slice(0, i);
   const body = dataUrl.slice(i + 1);
-  return /;base64/i.test(meta) ? Uint8Array.from(atob(body), (c) => c.charCodeAt(0)) : new TextEncoder().encode(decodeURIComponent(body));
+  if (!/;base64/i.test(meta)) return new TextEncoder().encode(decodeURIComponent(body));
+  // Pages often percent-encode or wrap base64 ("%2B", spaces, newlines); atob accepts neither.
+  let b64 = body;
+  try {
+    b64 = decodeURIComponent(body);
+  } catch { /* keep as is */ }
+  return Uint8Array.from(atob(b64.replace(/\s+/g, '')), (c) => c.charCodeAt(0));
 }
 
 async function toPage(bytes) {

@@ -49,14 +49,14 @@ const showView = (name) => document.querySelector(`.tab[data-view="${name}"]`)?.
 $('#openOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
 // ---------------------------------------------------------------- filters UI
-const chipSet = (container, values, label) => {
-  const on = new Set(values);
+const chipSet = (container, values, label, initial = values) => {
+  const on = new Set(values.filter((v) => initial.includes(v)));
   container.append(
     ...values.map((v) =>
       h('button', {
-        class: 'chip on',
+        class: on.has(v) ? 'chip on' : 'chip',
         type: 'button',
-        'aria-pressed': 'true',
+        'aria-pressed': String(on.has(v)),
         onclick: (e) => {
           on.has(v) ? on.delete(v) : on.add(v);
           e.currentTarget.classList.toggle('on', on.has(v));
@@ -68,7 +68,10 @@ const chipSet = (container, values, label) => {
   );
   return on;
 };
-const formatOn = chipSet($('#fFormats'), ALL_FORMATS, (f) => (f === 'OTHER' ? '기타' : f === 'JPEG' ? 'JPG' : f));
+// Starting filters come from the settings (default: JPG only, thumbnails hidden).
+const startFormats = Array.isArray(settings.filterFormats) && settings.filterFormats.length ? settings.filterFormats : ALL_FORMATS;
+const formatOn = chipSet($('#fFormats'), ALL_FORMATS, (f) => (f === 'OTHER' ? '기타' : f === 'JPEG' ? 'JPG' : f), startFormats);
+$('#fNoThumb').checked = !!settings.filterNoThumb;
 const stateOn = chipSet($('#fStates'), ALL_STATES, (s) => ORIGINAL_STATE[s]);
 for (const id of ['fMinW', 'fMinH', 'fMinSize', 'fSizeUnit', 'fUnknownSize', 'fNoThumb']) $('#' + id).addEventListener('input', () => render());
 
@@ -237,18 +240,20 @@ const render = rafThrottle(() => {
   const visibleIds = new Set(visible.map((x) => x.id));
   const selected = state.selected.size;
   const hiddenSelected = [...state.selected].filter((id) => !visibleIds.has(id)).length;
+  // Download and PDF act on what is selected *and shown*; hidden selections are kept for later.
+  const actionable = selected - hiddenSelected;
   $('#countLine').replaceChildren(
-    `추출 ${unique.length}개 · 표시 ${visible.length}개 · 선택 ${selected}개`,
+    `추출 ${unique.length}개 · 표시 ${visible.length}개 · 선택 ${actionable}개`,
     h('small', {}, [
-      hiddenSelected ? ` (필터로 숨겨진 선택 ${hiddenSelected}개 유지)` : '',
+      hiddenSelected ? ` (필터로 숨겨진 선택 ${hiddenSelected}개는 보관만 하고 다운로드·PDF에서 제외)` : '',
       duplicates.size ? ` · 같은 URL ${duplicates.size}개는 첫 항목으로 합침` : '',
       hiddenUnknownSize ? ` · 크기 확인 불가 ${hiddenUnknownSize}개 숨김` : '',
     ].join('')),
   );
-  $('#btnDownload').textContent = `선택 다운로드 (${selected})`;
-  $('#btnDownload').disabled = !selected;
-  $('#btnPdf').textContent = `PDF로 저장 (${selected})`;
-  $('#btnPdf').disabled = !selected || pdfRunning;
+  $('#btnDownload').textContent = `선택 다운로드 (${actionable})`;
+  $('#btnDownload').disabled = !actionable;
+  $('#btnPdf').textContent = `PDF로 저장 (${actionable})`;
+  $('#btnPdf').disabled = !actionable || pdfRunning;
   const empty = $('#emptyMsg');
   empty.hidden = visible.length > 0 || state.scanning;
   empty.textContent = unique.length ? '현재 필터에 맞는 이미지가 없습니다.' : state.tabId ? '찾은 이미지가 없습니다.' : '';
@@ -490,9 +495,10 @@ async function enqueue(jobs) {
   return command('enqueue', { jobs, settings: { conflictAction: settings.conflictAction, concurrency: settings.concurrency } });
 }
 
-/** Selected items in page order (selection hidden by filters included). */
+/** Selected items that are currently shown, in page order. Selections hidden by a
+ *  filter are kept but never downloaded or put into a PDF behind the user's back. */
 function selectedInOrder() {
-  return computeView().unique.filter((it) => state.selected.has(it.id));
+  return computeView().visible.filter((it) => state.selected.has(it.id));
 }
 
 async function downloadItems(list) {
@@ -563,7 +569,7 @@ $('#btnPdf').addEventListener('click', async () => {
       list.map((it) => ({ url: it.originalUrl, label: `#${it.seq}` })),
       {
         title,
-        pageSize: settings.pdfPageSize,
+        layout: settings.pdfLayout,
         signal: pdfAbort.signal,
         // Same-origin images can be read through the page itself (its own cookies, no CORS bypass).
         readViaPage: state.tabId
@@ -629,6 +635,11 @@ $('#pdfCancel').addEventListener('click', () => {
   else $('#pdfPanel').hidden = true;
 });
 
+$('#pdfLayout').value = settings.pdfLayout;
+$('#pdfLayout').addEventListener('change', async (e) => {
+  settings = await saveSettings({ pdfLayout: e.target.value });
+});
+
 // ---------------------------------------------------------------- other views
 const pasteView = initPasteView({ getSettings: () => settings, probe, enqueue });
 initDownloadsView({
@@ -646,5 +657,5 @@ initDownloadsView({
 // ---------------------------------------------------------------- start
 showPage();
 render();
-if (state.tabId) scan();
+if (state.tabId) scan({ scroll: !!settings.scrollOnOpen });
 else if (params.get('view')) showView(params.get('view'));

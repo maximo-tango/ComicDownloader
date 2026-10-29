@@ -1,4 +1,5 @@
-// Minimal PDF writer (no dependencies): one image per page.
+// Minimal PDF writer (no dependencies). Images are either joined into tall
+// pages without gaps (webtoons) or placed one per page.
 // JPEG files are embedded as-is (DCTDecode, no quality loss); every other
 // format is passed in as zlib-compressed RGB pixels (FlateDecode, lossless).
 
@@ -7,12 +8,12 @@ const A4 = [595.28, 841.89];
 const MAX_PAGE = 14400; // PDF page size limit in points
 
 /**
- * @param pages [{ kind: 'jpeg', data, width, height, components: 1 | 3 }
- *               | { kind: 'flate', data, width, height }]   (data: Uint8Array)
- * @param opts  { pageSize: 'image' | 'a4', title }
+ * @param images [{ kind: 'jpeg', data, width, height, components: 1 | 3 }
+ *                | { kind: 'flate', data, width, height }]   (data: Uint8Array)
+ * @param opts   { layout: 'continuous' | 'page' | 'a4', title }
  * @returns Uint8Array[] chunks of the file, in order (wrap them in a Blob)
  */
-export function buildPdf(pages, { pageSize = 'image', title = '' } = {}) {
+export function buildPdf(images, { layout = 'continuous', title = '' } = {}) {
   const chunks = [];
   const offsets = [];
   let pos = 0;
@@ -32,31 +33,41 @@ export function buildPdf(pages, { pageSize = 'image', title = '' } = {}) {
     write('endobj\n');
   };
 
-  // Object numbers: 1 catalog, 2 pages, 3 info, then 3 per page (page, image, contents)
-  const n = pages.length;
-  const pageObj = (i) => 4 + i * 3;
+  // Objects: 1 catalog, 2 page tree, 3 info, one per image, then (page, contents) per page.
+  const pages = planPages(images, layout);
+  const imgObj = (i) => 4 + i;
+  const pageObj = (p) => 4 + images.length + p * 2;
   write('%PDF-1.4\n');
   write(new Uint8Array([0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a])); // binary marker comment
   obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
-  obj(2, `<< /Type /Pages /Count ${n} /Kids [${pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ')}] >>`);
+  obj(2, `<< /Type /Pages /Count ${pages.length} /Kids [${pages.map((_, p) => `${pageObj(p)} 0 R`).join(' ')}] >>`);
   obj(3, `<< /Producer (Image Hunter) /Title ${pdfString(title)} >>`);
 
-  pages.forEach((p, i) => {
-    const [pw, ph, dx, dy, dw, dh] = layout(p.width, p.height, pageSize);
-    const imgN = pageObj(i) + 1;
-    const contN = pageObj(i) + 2;
-    obj(pageObj(i), `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(pw)} ${num(ph)}] /Resources << /XObject << /Im0 ${imgN} 0 R >> >> /Contents ${contN} 0 R >>`);
+  images.forEach((img, i) => {
     // Only greyscale/RGB JPEGs are passed through; the app re-encodes CMYK ones.
-    const cs = p.kind === 'jpeg' && p.components === 1 ? '/DeviceGray' : '/DeviceRGB';
-    const extra = '';
-    const filter = p.kind === 'jpeg' ? '/DCTDecode' : '/FlateDecode';
-    obj(imgN, `<< /Type /XObject /Subtype /Image /Width ${p.width} /Height ${p.height} /ColorSpace ${cs} /BitsPerComponent 8 /Filter ${filter}${extra} /Length ${p.data.length} >>`, p.data);
-    const content = enc.encode(`q ${num(dw)} 0 0 ${num(dh)} ${num(dx)} ${num(dy)} cm /Im0 Do Q`);
-    obj(contN, `<< /Length ${content.length} >>`, content);
+    const cs = img.kind === 'jpeg' && img.components === 1 ? '/DeviceGray' : '/DeviceRGB';
+    const filter = img.kind === 'jpeg' ? '/DCTDecode' : '/FlateDecode';
+    obj(imgObj(i), `<< /Type /XObject /Subtype /Image /Width ${img.width} /Height ${img.height} /ColorSpace ${cs} /BitsPerComponent 8 /Filter ${filter} /Length ${img.data.length} >>`, img.data);
+  });
+
+  pages.forEach((pg, p) => {
+    const used = [...new Set(pg.items.map((it) => it.index))];
+    const xobjects = used.map((i) => `/Im${i} ${imgObj(i)} 0 R`).join(' ');
+    obj(pageObj(p), `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(pg.width)} ${num(pg.height)}] /Resources << /XObject << ${xobjects} >> >> /Contents ${pageObj(p) + 1} 0 R >>`);
+    // PDF y runs upwards; items are laid out from the top of the page.
+    // Joined images overlap the next one by 0.5 pt so viewers don't draw a hairline seam.
+    const ops = pg.items
+      .map((it, k) => {
+        const h = it.h + (k < pg.items.length - 1 && pg.items[k + 1].y === it.y + it.h ? 0.5 : 0);
+        return `q ${num(it.w)} 0 0 ${num(h)} ${num(it.x)} ${num(pg.height - it.y - h)} cm /Im${it.index} Do Q`;
+      })
+      .join('\n');
+    const content = enc.encode(ops);
+    obj(pageObj(p) + 1, `<< /Length ${content.length} >>`, content);
   });
 
   const xrefPos = pos;
-  const count = 4 + n * 3;
+  const count = 4 + images.length + pages.length * 2;
   let xref = `xref\n0 ${count}\n0000000000 65535 f \n`;
   for (let i = 1; i < count; i++) xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
   write(xref);
@@ -64,8 +75,50 @@ export function buildPdf(pages, { pageSize = 'image', title = '' } = {}) {
   return chunks;
 }
 
+/**
+ * Decides pages and where each image goes (points, origin top-left).
+ *  continuous: images stacked with no gap, centred, at 1 px = 1 pt; a page is as
+ *              tall as the PDF limit allows and breaks only between images, so
+ *              the only seams are the few page boundaries.
+ *  page / a4:  one image per page.
+ * @returns [{ width, height, items: [{ index, x, y, w, h }] }]
+ */
+export function planPages(images, layout = 'continuous') {
+  if (layout !== 'continuous') {
+    return images.map((img, index) => {
+      const [pw, ph, dx, dy, dw, dh] = pageLayout(img.width, img.height, layout === 'a4' ? 'a4' : 'image');
+      return { width: pw, height: ph, items: [{ index, x: dx, y: ph - dy - dh, w: dw, h: dh }] };
+    });
+  }
+  const maxW = Math.max(...images.map((i) => i.width));
+  const s = Math.min(1, MAX_PAGE / maxW); // very wide strips: scale everything alike
+  const W = maxW * s;
+  const pages = [];
+  let cur = null;
+  images.forEach((img, index) => {
+    let w = img.width * s;
+    let h = img.height * s;
+    if (h > MAX_PAGE) {
+      // Taller than any page can be: give it its own page, scaled to fit.
+      const k = MAX_PAGE / h;
+      w *= k;
+      h = MAX_PAGE;
+      pages.push({ width: W, height: h, items: [{ index, x: (W - w) / 2, y: 0, w, h }] });
+      cur = null;
+      return;
+    }
+    if (!cur || cur.height + h > MAX_PAGE) {
+      cur = { width: W, height: 0, items: [] };
+      pages.push(cur);
+    }
+    cur.items.push({ index, x: (W - w) / 2, y: cur.height, w, h });
+    cur.height += h;
+  });
+  return pages;
+}
+
 /** Page size and image placement (all in points). */
-export function layout(w, h, pageSize) {
+export function pageLayout(w, h, pageSize) {
   if (pageSize === 'a4') {
     const [pw, ph] = w > h ? [A4[1], A4[0]] : A4; // landscape images get landscape pages
     const margin = 18;

@@ -4,6 +4,7 @@ const form = document.querySelector('#form');
 const ALL = { origins: ['<all_urls>'] };
 
 function fill(s) {
+  form.elements.jpgOnly.checked = Array.isArray(s.filterFormats) && s.filterFormats.length === 1 && s.filterFormats[0] === 'JPEG';
   for (const [k, v] of Object.entries(s)) {
     const el = form.elements[k];
     if (!el) continue;
@@ -24,11 +25,14 @@ form.addEventListener('change', async () => {
     folderMode: f.folderMode.value,
     conflictAction: f.conflictAction.value,
     concurrency: clamp(f.concurrency.value, 1, 8, 3),
-    pdfPageSize: f.pdfPageSize.value,
+    pdfLayout: f.pdfLayout.value,
     previewSize: f.previewSize.value,
     thumbMaxSide: clamp(f.thumbMaxSide.value, 16, 4000, 300),
     scrollMaxScreens: clamp(f.scrollMaxScreens.value, 1, 200, 30),
     guessVariants: f.guessVariants.checked,
+    scrollOnOpen: f.scrollOnOpen.checked,
+    filterNoThumb: f.filterNoThumb.checked,
+    filterFormats: f.jpgOnly.checked ? ['JPEG'] : null,
   });
   fill(s);
   document.querySelector('#saved').textContent = '저장되었습니다. 원본 판별 설정은 다음 검색부터 적용됩니다.';

@@ -218,7 +218,7 @@ export function initPasteView({ getSettings, probe, enqueue }) {
       const title = $('#pasteFolder').value.trim() || `images_${timestamp()}`;
       const result = await createPdf(list.map((r) => ({ url: r.url, label: `${r.n}번` })), {
         title,
-        pageSize: getSettings().pdfPageSize,
+        layout: getSettings().pdfLayout,
         onProgress: (i, n) => (btn.textContent = `PDF 만드는 중 ${i}/${n}`),
       });
       if (!result.blob) {
