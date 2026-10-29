@@ -61,3 +61,29 @@ test('not-found detection', () => {
   assert.equal(notFoundReason({ title: '괴력 난신 - 116화. 조태청(1) : 네이버 웹툰', bodyText: null }), '');
   assert.match(notFoundReason({ title: '회차', bodyText: '아직 공개되지 않았습니다.' }), /페이지 내용/);
 });
+
+test('numbers inside a part ("nv-752414-1"): each digit run separately, the last one first', () => {
+  const path = 'https://a.com/view/752414/nv-752414-1';
+  const p = findNumericParams(path);
+  assert.deepEqual(p.map((x) => x.value), ['1', '752414', '752414']);
+  assert.equal(p[0].label, '경로의 /nv-752414-[1]/');
+  assert.deepEqual(buildSeries(path, p[0], 1, 3).map((u) => u.url), [
+    'https://a.com/view/752414/nv-752414-1', 'https://a.com/view/752414/nv-752414-2', 'https://a.com/view/752414/nv-752414-3',
+  ]);
+  assert.equal(buildSeries(path, p[0], 256, 256)[0].url, 'https://a.com/view/752414/nv-752414-256');
+
+  const query = 'https://a.com/read?series=752414&v=nv-752414-1.html';
+  const q = findNumericParams(query);
+  const ep = q.find((x) => x.label === 'v=nv-752414-[1].html (주소의 ? 뒤)');
+  assert.ok(ep, 'last run of a query value offered');
+  assert.equal(buildSeries(query, ep, 7, 7)[0].url, 'https://a.com/read?series=752414&v=nv-752414-7.html');
+  const [id] = findNumericParams('https://a.com/read?id=nv-752414-001');
+  assert.equal(id.value, '001', 'episode-like key: its last number first');
+  assert.equal(buildSeries('https://a.com/read?id=nv-752414-001', id, 12, 12)[0].url, 'https://a.com/read?id=nv-752414-012');
+  assert.equal(notFoundReason({ requestedUrl: path, finalUrl: 'https://a.com/view/752414/', param: p[0] }).startsWith('다른 페이지로 이동됨'), true);
+  assert.equal(notFoundReason({ requestedUrl: path, finalUrl: path + '?x=1', param: p[0] }), '');
+});
+
+test('percent escapes in a path are not numbers', () => {
+  assert.deepEqual(findNumericParams('https://a.com/%EC%9B%B9%ED%88%B0-5').map((x) => x.value), ['5']);
+});

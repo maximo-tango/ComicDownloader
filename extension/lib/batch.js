@@ -2,8 +2,10 @@
 // the addresses from a start/end/step, and recognise addresses that don't exist.
 
 /**
- * Numeric parts of a URL that can be varied.
- * @returns [{ id, kind: 'query'|'path', key?, index?, value, label }]
+ * Numeric parts of a URL that can be varied. A number can be a whole query
+ * value or path segment ("no=116", "/1001/") or part of one ("nv-752414-1",
+ * where each digit run is offered separately).
+ * @returns [{ id, kind: 'query'|'path', key?, index?, run, value, label }]
  */
 export function findNumericParams(raw) {
   let u;
@@ -13,17 +15,43 @@ export function findNumericParams(raw) {
     return [];
   }
   const out = [];
+  const add = (base, token, where) => {
+    const runs = digitRuns(token, base.kind === 'path');
+    runs.forEach((m, run) => {
+      const whole = runs.length === 1 && m.text === token;
+      out.push({
+        ...base,
+        id: whole ? base.id : `${base.id}#${run}`,
+        run,
+        last: run === runs.length - 1,
+        multi: runs.length > 1,
+        value: m.text,
+        label: whole ? where.whole(m.text) : where.part(token.slice(0, m.at) + '[' + m.text + ']' + token.slice(m.at + m.text.length)),
+      });
+    });
+  };
   for (const [key, value] of u.searchParams) {
-    if (/^\d+$/.test(value)) out.push({ id: `q:${key}`, kind: 'query', key, value, label: `${key}=${value} (주소의 ? 뒤)` });
+    add({ id: `q:${key}`, kind: 'query', key }, value, { whole: (v) => `${key}=${v} (주소의 ? 뒤)`, part: (t) => `${key}=${t} (주소의 ? 뒤)` });
   }
   u.pathname.split('/').forEach((seg, index) => {
-    if (/^\d+$/.test(seg)) out.push({ id: `p:${index}`, kind: 'path', index, value: seg, label: `경로의 ${seg} (/${seg}/)` });
+    add({ id: `p:${index}`, kind: 'path', index }, seg, { whole: (v) => `경로의 ${v} (/${v}/)`, part: (t) => `경로의 /${t}/` });
   });
   // Most likely to change first: an episode-like query key ("no", "ep", "page" …),
-  // then the last number in the path (".../series/123/4567" → 4567), then the rest.
+  // then the last number in the path (".../series/123/4567" → 4567,
+  // ".../nv-752414-1" → 1), then the last number of a "name-123-4" value, then the rest.
   const lastPath = out.filter((p) => p.kind === 'path').at(-1);
-  const likely = (p) => (p.kind === 'query' && /^(no|ep|episode|page|p|chapter|ch|n|num|id)$/i.test(p.key) ? 0 : p === lastPath ? 1 : 2);
-  return out.sort((a, b) => likely(a) - likely(b));
+  const likely = (p) =>
+    p.kind === 'query' && p.last && /^(no|ep|episode|page|p|chapter|ch|n|num|id)$/i.test(p.key) ? 0 : p === lastPath ? 1 : p.multi && p.last ? 2 : 3;
+  return out.sort((a, b) => likely(a) - likely(b)).map(({ last, multi, ...p }) => p);
+}
+
+/** Digit runs in a query value or path segment (skips the hex digits of "%2D" escapes in paths). */
+function digitRuns(token, isPath) {
+  const runs = [];
+  for (const m of token.matchAll(isPath ? /%[0-9A-Fa-f]{2}|\d+/g : /\d+/g)) {
+    if (m[0][0] !== '%') runs.push({ text: m[0], at: m.index });
+  }
+  return runs;
 }
 
 /** Address for one number of the series (keeps zero padding: "007" → "008"). */
@@ -31,10 +59,15 @@ export function seriesUrl(raw, param, n) {
   const width = /^0\d/.test(param.value) ? param.value.length : 0;
   const v = width ? String(n).padStart(width, '0') : String(n);
   const u = new URL(raw);
-  if (param.kind === 'query') u.searchParams.set(param.key, v);
+  const swap = (token) => {
+    const m = digitRuns(token, param.kind === 'path')[param.run ?? 0];
+    if (!m) throw new Error('주소에서 바꿀 숫자를 찾지 못했습니다.');
+    return token.slice(0, m.at) + v + token.slice(m.at + m.text.length);
+  };
+  if (param.kind === 'query') u.searchParams.set(param.key, swap(u.searchParams.get(param.key) ?? ''));
   else {
     const segs = u.pathname.split('/');
-    segs[param.index] = v;
+    segs[param.index] = swap(segs[param.index] ?? '');
     u.pathname = segs.join('/');
   }
   return u.href;
@@ -97,8 +130,9 @@ export function notFoundReason({ status = 200, requestedUrl, finalUrl, param, ti
 function valueOf(url, param) {
   try {
     const u = new URL(url);
-    if (param.kind === 'query') return u.searchParams.get(param.key);
-    return u.pathname.split('/')[param.index] ?? null;
+    const token = param.kind === 'query' ? u.searchParams.get(param.key) : u.pathname.split('/')[param.index];
+    if (token == null) return null;
+    return digitRuns(token, param.kind === 'path')[param.run ?? 0]?.text ?? null;
   } catch {
     return null;
   }
