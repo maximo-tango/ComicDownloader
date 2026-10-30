@@ -170,6 +170,11 @@ export function startServer(port = 8765) {
     }
     // Episode list for "목록 페이지에서 링크 추출": newest first, a thumbnail link that
     // repeats an episode, one missing episode, and links that aren't episodes.
+    if (path === '/wt/500' && url.searchParams.get('page') === '2') {
+      // Second page of the list: one episode already on page 1, one new.
+      return html(res, `<!doctype html><meta charset="utf-8"><title>웹툰 목록 2</title>
+<ul><li><a href="/wt/500/1001">1화</a></li><li><a href="/wt/500/1007">0화 (예고)</a></li></ul><a href="/wt/500">이전 목록</a>`);
+    }
     if (path === '/wt/500') {
       const other = `http://localhost:${url.port}`;
       return html(res, `<!doctype html><meta charset="utf-8"><title>웹툰 목록</title>

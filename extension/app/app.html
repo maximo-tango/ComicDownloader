@@ -125,13 +125,14 @@
       <div id="bListPanel" class="panel" hidden>
         <label class="field grow"><span>목록 주소</span><input id="lUrl" type="url" placeholder="회차 목록 페이지 주소를 붙여넣으세요 (예: …/webtoon/list?titleId=…)"></label>
         <label class="check"><input id="lScroll" type="checkbox" checked> 목록도 스크롤하며 찾기</label>
-        <button id="lFetch" class="btn small primary">링크 찾기</button>
+        <button id="lFetch" class="btn small primary" title="목록이 여러 쪽이면 주소를 바꿔 다시 누르세요. 찾은 링크가 기존 목록 뒤에 더해집니다">링크 찾기</button>
         <div class="row" style="width:100%">
           <label class="field"><span>추출 범위</span><select id="lRule"><option value="similar">목록 주소와 비슷한 링크</option><option value="site">같은 사이트 전체</option></select></label>
           <label class="field"><span>주소에 포함</span><input id="lContains" type="text" placeholder="(선택)" maxlength="200"></label>
           <button id="lAll" class="btn small">모두 선택</button>
           <button id="lNone" class="btn small">모두 해제</button>
           <button id="lReverse" class="btn small" title="목록이 최신 회차부터 나오면 뒤집어 1화부터 처리합니다">순서 뒤집기</button>
+          <button id="lClear" class="btn small" title="찾은 링크를 모두 지우고 새로 시작합니다">목록 비우기</button>
         </div>
         <div id="lPreview" class="status-line"></div>
         <div class="table-wrap link-list" style="width:100%">

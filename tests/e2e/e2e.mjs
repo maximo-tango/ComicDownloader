@@ -688,6 +688,17 @@ await step('연속 PDF: 목록 페이지에서 링크 추출 — 비슷한 링�
     throw new Error(`${e.message}\nsummary: ${await app.$eval('#bSummary', (x) => x.textContent)}`);
   });
   assert.deepEqual(await filesSoon(path.join(downloadDir, 'ImageHunter', '목록'), 2), ['웹툰 1001.pdf', '웹툰 1009.pdf']);
+
+  // A list split over pages: change the address, find links again → appended, duplicates merged
+  await app.$eval('#lUrl', (e, u) => (e.value = u), `${SITE}/wt/500?page=2`);
+  await app.click('#lFetch');
+  await app.waitForFunction(() => /목록 페이지 2개/.test(document.querySelector('#lPreview').textContent) && !document.querySelector('#lFetch').disabled, { timeout: 60000 });
+  assert.deepEqual((await rowsOf()).map((r) => r.split(' ')[0]), ['0화', '1화', '2화', '4화', '9화'], 'page 2 appended (shown reversed), 1화 not repeated');
+  const checks = await app.$$eval('#lTable tbody input', (l) => l.map((b) => b.checked));
+  assert.deepEqual(checks, [true, true, true, false, true], 'earlier choices kept');
+  assert.match(await app.$eval('#lPreview', (e) => e.textContent), /^목록 페이지 2개 · 링크 5개 중 4개 선택/);
+  await app.click('#lClear');
+  assert.equal(await app.$eval('#lTable', (e) => e.hidden), true);
   await app.click('input[name="bMode"][value="series"]');
 });
 

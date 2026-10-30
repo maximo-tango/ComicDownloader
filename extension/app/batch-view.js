@@ -11,7 +11,7 @@ import { applyFilters, DEFAULT_FILTERS, relaxations } from '../lib/filters.js';
 import { dedupeInOrder, screenOrder } from '../lib/ordering.js';
 import { urlKey } from '../lib/url-utils.js';
 import { buildFolder, sanitizeFilename } from '../lib/filename.js';
-import { findNumericParams, makeSeries, notFoundReason, pickLinks, similarHint } from '../lib/batch.js';
+import { findNumericParams, makeSeries, notFoundReason, pickFromLists, similarHint } from '../lib/batch.js';
 
 const STEP = {
   waiting: '대기', opening: '페이지 여는 중', scrolling: '스크롤하며 이미지 불러오는 중', analyzing: '원본 확인 중',
@@ -86,7 +86,9 @@ export function initBatchView({ getSettings }) {
   }
   for (const r of document.querySelectorAll('input[name="bMode"]')) r.addEventListener('change', () => setMode(mode()));
 
-  let listSource = null; // { url, links } as read from the list page
+  // List pages read so far ({ url, links }); "링크 찾기" on another page appends to them,
+  // so a list split over several pages (navigation) becomes one list.
+  let listSources = [];
   let picked = [];
   const unchecked = new Set();
   let reversed = false;
@@ -94,18 +96,19 @@ export function initBatchView({ getSettings }) {
 
   function renderLinks() {
     const tb = $('#lTable tbody');
-    if (!listSource) {
+    if (!listSources.length) {
       picked = [];
       tb.replaceChildren();
       $('#lTable').hidden = true;
       return;
     }
     const opts = { contains: $('#lContains').value };
-    const counts = { similar: pickLinks(listSource.url, listSource.links, { ...opts, rule: 'similar' }).length, site: pickLinks(listSource.url, listSource.links, { ...opts, rule: 'site' }).length };
+    const counts = { similar: pickFromLists(listSources, { ...opts, rule: 'similar' }).length, site: pickFromLists(listSources, { ...opts, rule: 'site' }).length };
     const [o1, o2] = $('#lRule').options;
-    o1.textContent = `목록 주소와 비슷한 링크 (${similarHint(listSource.url)}) — ${counts.similar}개`;
-    o2.textContent = `같은 사이트 전체 (${new URL(listSource.url).origin}/) — ${counts.site}개`;
-    picked = pickLinks(listSource.url, listSource.links, { ...opts, rule: $('#lRule').value });
+    const first = listSources[0].url;
+    o1.textContent = `목록 주소와 비슷한 링크 (${similarHint(first)}${listSources.length > 1 ? ' 등' : ''}) — ${counts.similar}개`;
+    o2.textContent = `같은 사이트 전체 (${new URL(first).origin}/) — ${counts.site}개`;
+    picked = pickFromLists(listSources, { ...opts, rule: $('#lRule').value });
     if (reversed) picked.reverse();
     tb.replaceChildren(
       ...picked.map((l, i) => {
@@ -124,9 +127,10 @@ export function initBatchView({ getSettings }) {
   const chosenLinks = () => picked.filter((l) => !unchecked.has(l.url));
   function linkSummary() {
     $('#lPreview').classList.toggle('error', !picked.length);
+    const pages = listSources.length > 1 ? `목록 페이지 ${listSources.length}개 · ` : '';
     $('#lPreview').textContent = picked.length
-      ? `링크 ${picked.length}개 중 ${chosenLinks().length}개 선택 · 위에서부터 차례로 처리합니다${reversed ? ' (뒤집은 순서)' : ''}`
-      : `조건에 맞는 링크가 없습니다 (페이지의 링크 ${listSource.links.length}개). 추출 범위를 "같은 사이트 전체"로 바꿔 보세요.`;
+      ? `${pages}링크 ${picked.length}개 중 ${chosenLinks().length}개 선택 · 위에서부터 차례로 처리합니다${reversed ? ' (뒤집은 순서)' : ''}`
+      : `${pages}조건에 맞는 링크가 없습니다 (페이지의 링크 ${listSources.reduce((n, s) => n + s.links.length, 0)}개). 추출 범위를 "같은 사이트 전체"로 바꿔 보세요.`;
   }
   $('#lRule').addEventListener('change', renderLinks);
   $('#lContains').addEventListener('input', renderLinks);
@@ -137,6 +141,14 @@ export function initBatchView({ getSettings }) {
   $('#lNone').addEventListener('click', () => {
     picked.forEach((l) => unchecked.add(l.url));
     renderLinks();
+  });
+  $('#lClear').addEventListener('click', () => {
+    listSources = [];
+    unchecked.clear();
+    reversed = false;
+    renderLinks();
+    $('#lPreview').classList.remove('error');
+    $('#lPreview').textContent = '';
   });
   $('#lReverse').addEventListener('click', () => {
     reversed = !reversed;
@@ -168,11 +180,14 @@ export function initBatchView({ getSettings }) {
         await scrollInTab(tabId, getSettings().scrollMaxScreens);
       }
       const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: collectLinks });
-      listSource = { url: result.pageUrl, links: result.links };
-      unchecked.clear();
-      reversed = false;
-      $('#lRule').value = pickLinks(listSource.url, listSource.links, { rule: 'similar' }).length ? 'similar' : 'site';
+      const src = { url: result.pageUrl, links: result.links };
+      const known = listSources.findIndex((s) => s.url === src.url);
+      const before = picked.length;
+      if (known >= 0) listSources[known] = src; // the same list page again: refresh it
+      else listSources.push(src);
+      if (listSources.length === 1) $('#lRule').value = pickFromLists(listSources, { rule: 'similar' }).length ? 'similar' : 'site';
       renderLinks();
+      if (listSources.length > 1 || known >= 0) toast(`링크 ${Math.max(0, picked.length - before)}개를 목록에 더했습니다 (목록 페이지 ${listSources.length}개).`);
     } catch (e) {
       $('#lPreview').classList.add('error');
       $('#lPreview').textContent = `목록을 읽지 못했습니다: ${e?.message || e}`;
@@ -441,7 +456,7 @@ export function initBatchView({ getSettings }) {
     try {
       if (mode() === 'list') {
         const chosen = chosenLinks();
-        if (!listSource) throw new Error('목록 주소를 넣고 "링크 찾기"를 누르세요.');
+        if (!listSources.length) throw new Error('목록 주소를 넣고 "링크 찾기"를 누르세요.');
         if (!chosen.length) throw new Error('처리할 링크를 하나 이상 선택하세요.');
         sr = { count: chosen.length, at: (i) => (i < chosen.length ? { n: i + 1, url: chosen[i].url, title: chosen[i].text } : null) };
       } else sr = series();
@@ -449,9 +464,10 @@ export function initBatchView({ getSettings }) {
       return toast(e.message);
     }
     // Opening tabs by itself needs access to that site (activeTab covers only a tab the user opened the menu on).
-    const origin = new URL(sr.at(0).url).origin;
-    const granted = await chrome.permissions.request({ origins: [`${origin}/*`] }).catch(() => false);
-    if (!granted) return toast(`${new URL(origin).host} 접근을 허용해야 페이지를 자동으로 열 수 있습니다.`, 4000);
+    // Links gathered from several list pages may span more than one site.
+    const origins = [...new Set((mode() === 'list' ? chosenLinks().map((l) => l.url) : [sr.at(0).url]).map((u) => new URL(u).origin))];
+    const granted = await chrome.permissions.request({ origins: origins.map((o) => `${o}/*`) }).catch(() => false);
+    if (!granted) return toast(`${origins.map((o) => new URL(o).host).join(', ')} 접근을 허용해야 페이지를 자동으로 열 수 있습니다.`, 4000);
     rows = [];
     total = sr.count;
     tbody.replaceChildren();

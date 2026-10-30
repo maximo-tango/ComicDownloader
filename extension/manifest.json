@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Image Hunter",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "웹페이지의 이미지를 페이지 순서대로 추출하고, 원본 후보를 확인해 일괄 다운로드하거나 PDF로 저장합니다.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "scripting", "downloads", "storage"],

@@ -182,7 +182,7 @@ export function pickLinks(listUrl, links, { rule = 'similar', contains = '' } = 
   list.hash = '';
   const dir = list.pathname.replace(/\/+$/, '') + '/';
   const parent = list.pathname.replace(/[^/]*$/, '');
-  const ids = [...list.searchParams].filter(([, v]) => /^\d+$/.test(v));
+  const ids = listIds(list);
   const similar = (u) =>
     (u.pathname.startsWith(dir) && u.pathname !== dir) ||
     (ids.length > 0 && u.pathname !== list.pathname && u.pathname.startsWith(parent) && ids.some(([k, v]) => u.searchParams.get(k) === v));
@@ -215,11 +215,41 @@ export function pickLinks(listUrl, links, { rule = 'similar', contains = '' } = 
   return out;
 }
 
+/**
+ * Links from several list pages (page 1, page 2 … of an episode list), in the
+ * order the pages were read, without duplicates and without the list pages themselves.
+ * @param sources [{ url, links }]
+ */
+export function pickFromLists(sources, opts) {
+  const lists = new Set(sources.map((s) => s.url.replace(/#.*$/, '')));
+  const seen = new Map();
+  const out = [];
+  for (const src of sources) {
+    for (const l of pickLinks(src.url, src.links, opts)) {
+      if (lists.has(l.url)) continue;
+      const prev = seen.get(l.url);
+      if (prev) {
+        if (!prev.text) prev.text = l.text;
+        continue;
+      }
+      seen.set(l.url, l);
+      out.push(l);
+    }
+  }
+  return out;
+}
+
+// Numeric query values that identify the series ("titleId=7"), not paging or sorting.
+const PAGING_KEYS = /^(page|p|pg|pageno|page_no|offset|start|sort|order|limit|size|per_page)$/i;
+function listIds(u) {
+  return [...u.searchParams].filter(([k, v]) => /^\d+$/.test(v) && !PAGING_KEYS.test(k));
+}
+
 /** Short description of what 'similar' keeps, for the rule picker. */
 export function similarHint(listUrl) {
   try {
     const u = new URL(listUrl);
-    const ids = [...u.searchParams].filter(([, v]) => /^\d+$/.test(v)).map(([k, v]) => `${k}=${v}`);
+    const ids = listIds(u).map(([k, v]) => `${k}=${v}`);
     return `${u.pathname.replace(/\/+$/, '')}/…${ids.length ? ` 또는 ${ids.join(', ')}이 같은 주소` : ''}`;
   } catch {
     return '';
