@@ -34,6 +34,12 @@
           <option value="a4">이미지마다 A4 한 쪽</option>
         </select></label>
 
+      <label class="field"><span>이미지 순서</span>
+        <select name="orderMode">
+          <option value="screen">화면 위치 순서 (위→아래, 같은 줄은 왼쪽→오른쪽)</option>
+          <option value="dom">페이지 구조(HTML) 순서</option>
+        </select></label>
+
       <h2>이미지 목록을 열 때</h2>
       <label class="check"><input name="scrollOnOpen" type="checkbox"> 처음 검색할 때 스크롤하며 추가 검색까지 하기</label>
       <label class="check"><input name="filterNoThumb" type="checkbox"> "썸네일 의심 제외" 켜기</label>

@@ -74,8 +74,9 @@ const helper = await browser.newPage(); // extension page used for tab queries a
 await helper.goto(`chrome-extension://${extId}/options/options.html`);
 const ext = (fn, ...args) => helper.evaluate(fn, ...args);
 // The steps below check every format and thumbnail; the shipped defaults
-// (JPG only, thumbnails hidden, scroll on open) get their own step at the end.
-const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false, filterMinWidth: 0, filterMinHeight: 0 };
+// (JPG only, thumbnails hidden, scroll on open, screen order) get their own step at the end.
+// The fixture pages' checks are written in HTML order; screen order has its own step.
+const ALL_FILTERS = { filterNoThumb: false, filterFormats: null, scrollOnOpen: false, filterMinWidth: 0, filterMinHeight: 0, orderMode: 'dom' };
 await ext((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
 const consoleErrors = [];
 
@@ -354,7 +355,7 @@ await step('[19][23] 일괄 다운로드: ImageHunter/페이지 제목/ 폴더, 
   }
   assert.ok(jobs.every((j) => j.source === 'page' && j.itemKey));
   const c = await cards(app);
-  assert.ok(byPath(c, '/img/plain-large.png').badges.includes('다운로드 완료'));
+  assert.ok(byPath(c, '/img/plain-large.png').badges.includes('다운로드 완료'), JSON.stringify(byPath(c, '/img/plain-large.png')));
 });
 
 await step('[9] 핫링크 방지·없는 이미지: 우회하지 않고 실패 사유 표시', async () => {
@@ -690,6 +691,77 @@ await step('연속 PDF: 목록 페이지에서 링크 추출 — 비슷한 링�
   await app.click('input[name="bMode"][value="series"]');
 });
 
+await step('화면 위치 순서(기본): HTML 순서를 섞고 CSS로 제자리에 둔 페이지도 보이는 순서대로 PDF', async () => {
+  await app.bringToFront();
+  await app.click('input[name="bMode"][value="series"]');
+  await app.select('#bOrder', 'screen');
+  const setv = (sel, v) => app.$eval(sel, (e, x) => { e.value = x; e.dispatchEvent(new Event('input')); }, v);
+  await setv('#bUrl', `${SITE}/shuffled?no=1`);
+  await setv('#bStart', '1');
+  await setv('#bEnd', '1');
+  await app.$eval('#bJpg', (e) => (e.checked = false));
+  const widthsOf = (folder) => {
+    const dir = path.join(downloadDir, 'ImageHunter', folder);
+    const text = readFileSync(path.join(dir, files(dir)[0]), 'latin1');
+    return [...text.matchAll(/\/Subtype \/Image \/Width (\d+)/g)].map((m) => Number(m[1]));
+  };
+  const runOnce = async (folder) => {
+    await app.$eval('#bFolder', (e, f) => (e.value = f), folder);
+    await app.click('#bRun');
+    await app.waitForFunction(() => !document.querySelector('#bRun').disabled && /완료 1/.test(document.querySelector('#bSummary').textContent), { timeout: 60000 });
+    await filesSoon(path.join(downloadDir, 'ImageHunter', folder), 1);
+    return widthsOf(folder);
+  };
+  assert.deepEqual(await runOnce('화면순서'), [610, 620, 630, 640], 'as shown on screen');
+  await app.select('#bOrder', 'dom');
+  assert.deepEqual(await runOnce('HTML순서'), [630, 610, 640, 620], 'as written in the HTML');
+  await app.select('#bOrder', 'screen');
+  await app.$eval('#bJpg', (e) => (e.checked = true));
+
+  // The list view follows the same setting
+  const site = await openSite('/shuffled');
+  await ext(() => chrome.storage.local.get('settings').then((r) => chrome.storage.local.set({ settings: { ...r.settings, orderMode: 'screen' } })));
+  const sapp = await openApp(`tabId=${site.tabId}`);
+  await sapp.bringToFront();
+  await waitScan(sapp);
+  const names = async () => (await cards(sapp)).map((c) => c.url.split('/').pop());
+  assert.deepEqual(await names(), ['1.png', '2.png', '3.png', '4.png']);
+  await sapp.select('#orderMode', 'dom');
+  await sapp.waitForFunction(() => /\/3\.png$/.test(document.querySelector('#grid .card .name a')?.href || ''), { timeout: 5000 }).catch(() => {});
+  assert.deepEqual(await names(), ['3.png', '1.png', '4.png', '2.png']);
+  await sapp.close();
+  await ext((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);
+  await site.page.close();
+});
+
+await step('연속 PDF: 찾은 이미지는 있지만 조건에 맞지 않으면 썸네일·WEBP 조건을 풀어 진행', async () => {
+  await app.bringToFront();
+  const setv = (sel, v) => app.$eval(sel, (e, x) => { e.value = x; e.dispatchEvent(new Event('input')); }, v);
+  await setv('#bUrl', `${SITE}/previews?no=1`);
+  await setv('#bStart', '1');
+  await setv('#bEnd', '1');
+  await app.$eval('#bNoThumb', (e) => (e.checked = true));
+  await app.$eval('#bJpg', (e) => (e.checked = false));
+  const go = async (folder) => {
+    await app.$eval('#bFolder', (e, f) => (e.value = f), folder);
+    await app.click('#bRun');
+    await app.waitForFunction(() => !document.querySelector('#bRun').disabled && /확인 1/.test(document.querySelector('#bSummary').textContent), { timeout: 60000 });
+    return app.$eval('#bTable tbody tr', (tr) => [...tr.children].map((td) => td.textContent));
+  };
+  const row = await go('완화');
+  assert.equal(row[2], '완료', row.join(' | '));
+  assert.equal(row[3], '2장 / 찾은 2장');
+  assert.equal(row[5], '조건 완화: 썸네일 의심 포함');
+  assert.deepEqual(await filesSoon(path.join(downloadDir, 'ImageHunter', '완화'), 1), ['미리보기 경로.pdf']);
+  // Turned off: the page is skipped with the count of images it did have
+  await app.$eval('#bRelax', (e) => (e.checked = false));
+  const off = await go('완화안함');
+  assert.equal(off[2], '건너뜀');
+  assert.equal(off[5], '찾은 2장 중 조건에 맞는 이미지가 없습니다');
+  await app.$eval('#bRelax', (e) => (e.checked = true));
+  await app.$eval('#bJpg', (e) => (e.checked = true));
+});
+
 await step('PDF 파일명: Chrome이 "Invalid filename"으로 거부하는 이름도 저장됨', async () => {
   const titles = [
     '리턴 투 플레이어 56화 56화. 숨겨진 폭탄 (2) | 뉴토끼',
@@ -730,6 +802,7 @@ await step('기본 설정: JPG만·썸네일 의심 제외·처음 검색 때 �
   // the batch view starts from the same defaults
   assert.deepEqual(await dapp.$$eval('#bMinW, #bMinH', (l) => l.map((i) => i.value)), ['500', '400']);
   assert.equal(await dapp.$eval('#bJpg', (e) => e.checked), true);
+  assert.deepEqual(await dapp.$$eval('#orderMode, #bOrder', (l) => l.map((s) => s.value)), ['screen', 'screen'], 'screen order by default');
   await dapp.close();
   await site2.page.close();
   await ext((s) => chrome.storage.local.set({ settings: s }), ALL_FILTERS);

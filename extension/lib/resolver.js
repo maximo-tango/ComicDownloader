@@ -170,6 +170,7 @@ export function chooseOriginal(entry, probed, opts = DEFAULT_RESOLVE_OPTIONS) {
     originalStatus,
     displayUrl: entry.displayUrl,
     rendered: entry.rendered || null,
+    pos: entry.pos || null,
     order: entry.order,
     elementType: entry.elementType,
     candidates: probed.map((c) => ({

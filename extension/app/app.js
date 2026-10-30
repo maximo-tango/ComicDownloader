@@ -10,7 +10,7 @@ import { resolveEntry, selectCandidate, ORIGINAL_STATE, SOURCE_LABEL } from '../
 import { ALL_FORMATS, ALL_STATES, LIMITS, applyFilters, parseLimit } from '../lib/filters.js';
 import { buildFolder, fallbackBaseName, sanitizeFilename } from '../lib/filename.js';
 import { urlBasename, urlKey } from '../lib/url-utils.js';
-import { dedupeInOrder, mergeOrder } from '../lib/ordering.js';
+import { dedupeInOrder, mergeOrder, screenOrder } from '../lib/ordering.js';
 import { loadSettings, saveSettings } from '../lib/settings.js';
 
 let settings = await loadSettings();
@@ -115,11 +115,13 @@ setPreviewSize(settings.previewSize || 'medium', false);
 
 // ---------------------------------------------------------------- view model
 /**
- * Page order → URL de-duplication (first occurrence wins) → display filter.
+ * Page order (as shown on screen, or as in the HTML) → URL de-duplication
+ * (first occurrence wins) → display filter.
  * Filtering keeps relative order and never touches the data or selection.
  */
 function computeView() {
-  const ordered = state.order.map((id) => state.items.get(id)).filter(Boolean);
+  let ordered = state.order.map((id) => state.items.get(id)).filter(Boolean);
+  if (settings.orderMode !== 'dom') ordered = screenOrder(ordered);
   const { unique, duplicates } = dedupeInOrder(ordered, (it) => (it.urlError ? null : urlKey(it.originalUrl || it.displayUrl)));
   unique.forEach((it, i) => (it.seq = i + 1));
   const { items: visible, hiddenUnknownSize } = applyFilters(unique, currentFilters());
@@ -329,6 +331,7 @@ function fromEntry(e) {
     elementType: e.elementType,
     urlKind: e.urlKind,
     urlError: e.urlError || null,
+    pos: e.pos || null,
     originalUrl: e.displayUrl,
     sourcePageUrl: e.pageUrl,
     pending: !e.urlError,
@@ -401,7 +404,8 @@ async function scan({ scroll = false } = {}) {
     const entries = [];
     for (const r of results) {
       if (!r.result) continue;
-      for (const e of r.result.entries) entries.push({ ...e, key: `${r.frameId}:${e.key}`, pageUrl: main.pageUrl, frameUrl: r.result.pageUrl });
+      // Positions inside an iframe aren't page positions: those images keep their place after the page's.
+      for (const e of r.result.entries) entries.push({ ...e, pos: r.frameId === 0 ? e.pos : null, key: `${r.frameId}:${e.key}`, pageUrl: main.pageUrl, frameUrl: r.result.pageUrl });
     }
     const keys = entries.map((e) => e.key);
     state.order = mergeOrder(state.order, keys);
@@ -413,6 +417,7 @@ async function scan({ scroll = false } = {}) {
     let updated = 0;
     for (const e of entries) {
       let it = state.items.get(e.key);
+      if (it) it.pos = e.pos; // the layout may have moved since the last scan
       if (!it) {
         it = { id: e.key, inPage: true, originalState: 'unknown', candidates: [], ...fromEntry(e) };
         state.items.set(e.key, it);
@@ -455,7 +460,7 @@ async function resolveItems(list, gen) {
       const sig = it.candSig;
       const r = await resolveEntry(it.entry, probe, opts);
       if (gen !== state.scanGen || it.candSig !== sig || it.userChosen) return;
-      const { order, ...fields } = r;
+      const { order, pos, ...fields } = r; // keep the position from the latest scan
       Object.assign(it, fields, { pending: false });
       done++;
       progress();
@@ -636,6 +641,12 @@ function offerSiteAccess(skipped) {
 $('#pdfCancel').addEventListener('click', () => {
   if (pdfRunning) pdfAbort?.abort();
   else $('#pdfPanel').hidden = true;
+});
+
+$('#orderMode').value = settings.orderMode === 'dom' ? 'dom' : 'screen';
+$('#orderMode').addEventListener('change', async (e) => {
+  settings = await saveSettings({ orderMode: e.target.value });
+  render();
 });
 
 $('#pdfLayout').value = settings.pdfLayout;

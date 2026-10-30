@@ -112,8 +112,15 @@ export function collectImages(options) {
 
   const entries = [];
   // key: stable per element (+ index for elements with several backgrounds)
+  // Where the element sits on the page (document coordinates), for "screen order".
+  // null for elements that take no space (hidden, <meta>).
+  const posOf = (el) => {
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return null;
+    return { top: Math.round(r.top + window.scrollY), left: Math.round(r.left + window.scrollX), h: Math.round(r.height) };
+  };
   const push = (el, n, entry) => {
-    entries.push({ key: `${g.docId}:${idOf(el)}:${n}`, ...entry });
+    entries.push({ key: `${g.docId}:${idOf(el)}:${n}`, pos: posOf(el), ...entry });
   };
   const broken = (el, n, elementType, c) => {
     push(el, n, { elementType, displayUrl: c.url, urlKind: c.kind, urlError: c.error, natural: null, rendered: null, candidates: [] });

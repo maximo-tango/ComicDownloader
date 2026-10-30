@@ -43,6 +43,8 @@
         <div class="field"><span>확장자</span><div id="fFormats" class="chips"></div></div>
         <div class="field"><span>원본 상태</span><div id="fStates" class="chips"></div></div>
         <label class="check"><input id="fNoThumb" type="checkbox"> 썸네일 의심 제외</label>
+        <label class="field" title="사이트가 HTML과 다른 순서로 이미지를 배치할 때는 화면 위치 순서가 보이는 대로입니다"><span>순서</span>
+          <select id="orderMode"><option value="screen">화면 위치</option><option value="dom">페이지 구조(HTML)</option></select></label>
         <div class="field"><span>미리보기</span>
           <div class="segmented" role="radiogroup" aria-label="미리보기 크기">
             <button data-size="small" role="radio">작게</button><button data-size="medium" role="radio">중간</button><button data-size="large" role="radio">크게</button>
@@ -153,6 +155,8 @@
         <label class="check"><input id="bJpg" type="checkbox"> JPG만</label>
         <label class="check"><input id="bNoThumb" type="checkbox"> 썸네일 의심 제외</label>
         <label class="check"><input id="bScroll" type="checkbox"> 스크롤하며 추가 검색</label>
+        <label class="check" title="찾은 이미지는 있는데 조건에 맞는 것이 없으면 썸네일 의심 포함 → WEBP 포함 → 둘 다 순서로 조건을 풀어 다시 고릅니다 (크기 조건은 그대로)"><input id="bRelax" type="checkbox" checked> 맞는 이미지가 없으면 조건 완화</label>
+        <label class="field" title="사이트가 HTML과 다른 순서로 이미지를 배치할 때는 화면 위치 순서가 보이는 대로입니다"><span>순서</span><select id="bOrder"><option value="screen">화면 위치</option><option value="dom">페이지 구조(HTML)</option></select></label>
         <label class="field"><span>PDF 구성</span><select id="bLayout"><option value="continuous">이어 붙이기</option><option value="page">이미지마다 한 쪽</option><option value="a4">A4</option></select></label>
         <label class="field"><span>하위 폴더</span><input id="bFolder" type="text" placeholder="(선택)" maxlength="80"></label>
         <label class="field" title="사이트에 부담을 주지 않도록 페이지 사이에 기다리는 시간"><span>페이지 사이 대기</span><input id="bDelay" type="number" min="0" max="60" value="2"> 초</label>

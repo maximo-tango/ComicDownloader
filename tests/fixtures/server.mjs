@@ -92,6 +92,12 @@ function imageSpec(pathname) {
   const ep = /^\/ep\/(\d+)\/(\d)\.png$/.exec(pathname);
   if (ep) return [690, 1000 - Number(ep[2]) * 50, Number(ep[1]) * 10 + Number(ep[2])];
   if (pathname === '/ep/banner.png') return [300, 100, 99];
+  // /shuffle/<k>.png: strip k of the shuffled page, told apart by width (610, 620, …)
+  // /preview/<k>.png: full-size strips whose path looks like a thumbnail's ("preview")
+  const pv = /^\/preview\/(\d)\.png$/.exec(pathname);
+  if (pv) return [690, 900, 50 + Number(pv[1])];
+  const sh = /^\/shuffle\/(\d)\.png$/.exec(pathname);
+  if (sh) return [600 + Number(sh[1]) * 10, 800, 40 + Number(sh[1])];
   const g = /^\/gen\/(\d+)\.png$/.exec(pathname);
   if (g) {
     const n = Number(g[1]);
@@ -114,6 +120,18 @@ function episodePage(n, title = `에피소드 ${n}`) {
     const i = document.createElement('img'); i.src = '/ep/${n}/3.png'; document.getElementById('lazy').append(i);
   }).observe(document.getElementById('lazy'));
 </script>`;
+}
+
+// Strips 1-4 written in the HTML as 3, 1, 4, 2 and put back in place on screen with CSS
+// (flex `order` for the first three, absolute positioning for the last).
+function shuffledPage() {
+  const strip = (k, style) => `<img src="/shuffle/${k}.png" width="${600 + k * 10}" height="800" style="display:block;${style}">`;
+  return `<!doctype html><meta charset="utf-8"><title>섞인 순서</title>
+<div style="position:relative;height:3300px">
+  <div style="display:flex;flex-direction:column">
+    ${strip(3, 'order:3')}${strip(1, 'order:1')}${strip(4, 'position:absolute;top:2420px;left:0')}${strip(2, 'order:2')}
+  </div>
+</div>`;
 }
 
 function manyPage(n) {
@@ -164,6 +182,8 @@ export function startServer(port = 8765) {
 </ul><a href="/wt/500?page=2">다음 목록</a>`);
     }
     if (path === '/wt/500/list') return html(res, '<!doctype html><meta charset="utf-8"><title>작품 목록</title><ul><li>목록</li></ul>');
+    if (path === '/shuffled') return html(res, shuffledPage());
+    if (path === '/previews') return html(res, '<!doctype html><meta charset="utf-8"><title>미리보기 경로</title><img src="/preview/1.png"><img src="/preview/2.png">');
     if (path === '/many') return html(res, manyPage(Math.min(5000, Number(url.searchParams.get('n')) || 1000)));
     if (path === '/webtoon/1') return html(res, '<!doctype html><title>Episode</title><img src="/img/lazy-1.png"><img src="/img/lazy-2.png">');
     if (extraPages.has(path)) return html(res, extraPages.get(path));

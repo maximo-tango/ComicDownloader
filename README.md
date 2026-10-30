@@ -10,7 +10,7 @@
 | 기능 | 내용 |
 | --- | --- |
 | 이미지 추출 | `img.src`/`currentSrc`, `srcset`·`sizes`, `<picture>`, `data-src`·`data-srcset`·`data-original`, 이미지 URL이 들어 있는 다른 `data-*` 속성(검증 후 사용), 이미지 링크, CSS `background-image`(여러 개 포함), Shadow DOM, 스크롤하면 나타나는 이미지 |
-| 순서 보존 | DOM 순서 그대로입니다. 재검색에서 새로 찾은 이미지는 페이지 안 실제 위치에 들어갑니다. 정렬 기능은 없고, 필터와 미리보기 크기는 순서를 바꾸지 않습니다. |
+| 순서 보존 | 기본은 **화면에 보이는 위치 순서**(위→아래, 같은 줄은 왼쪽→오른쪽)입니다. HTML과 다른 순서로 배치하는 페이지도 보이는 대로 나옵니다. 페이지 구조(DOM) 순서로 바꿀 수 있습니다. 재검색에서 새로 찾은 이미지는 페이지 안 실제 위치에 들어갑니다. 파일명·해상도 정렬은 없고, 필터와 미리보기 크기는 순서를 바꾸지 않습니다. |
 | 원본 후보 | 요소마다 후보 URL을 모으고 파일 앞부분을 읽어 실제 해상도·형식·크기를 확인합니다. 상태는 "원본 후보 확인 / 고해상도 후보 / 후보 비교 필요 / 확인 불가" 중 하나로 표시합니다. 카드에서 후보를 직접 바꿀 수 있습니다. |
 | 연속 목록 | 단일 이미지 뷰어 없이 한 목록에서 봅니다. 미리보기는 작게·중간·크게 중에서 고르고, 방향키와 Space로 이동·선택합니다. |
 | 필터 | 최소 너비·높이·파일 크기, 확장자, 원본 상태, 썸네일 의심 제외. 크기를 확인할 수 없는 항목을 표시할지 숨길지 정할 수 있습니다. |
@@ -80,7 +80,7 @@ extension/                    ← Chrome에 로드하는 폴더
     ├── resolver.js           원본 후보 판정 (image-candidates.js)
     ├── probe.js, image-header.js  이미지 메타데이터 확인 (image-metadata.js)
     ├── url-utils.js          URL 검증·정규화
-    ├── ordering.js           순서 병합·중복 제거
+    ├── ordering.js           순서 병합·화면 위치 순서·중복 제거
     ├── filters.js, filename.js, export.js, pdf.js, paste.js, settings.js, variants.js
 tests/                        자동 테스트, 테스트 사이트, 수동 테스트 절차 (tests/README.md)
 scripts/                      build.sh (ZIP), make-icons.mjs

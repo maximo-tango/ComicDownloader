@@ -7,8 +7,8 @@ import { createPdf, savePdf } from './pdf-export.js';
 import { collectImages, collectLinks, autoScroll, readImageInPage } from '../content/collector.js';
 import { createProber, decodeWithImage, hostAccessPolicy, setCredentialPolicy } from '../lib/probe.js';
 import { resolveEntry } from '../lib/resolver.js';
-import { applyFilters, DEFAULT_FILTERS } from '../lib/filters.js';
-import { dedupeInOrder } from '../lib/ordering.js';
+import { applyFilters, DEFAULT_FILTERS, relaxations } from '../lib/filters.js';
+import { dedupeInOrder, screenOrder } from '../lib/ordering.js';
 import { urlKey } from '../lib/url-utils.js';
 import { buildFolder, sanitizeFilename } from '../lib/filename.js';
 import { findNumericParams, makeSeries, notFoundReason, pickLinks, similarHint } from '../lib/batch.js';
@@ -34,6 +34,7 @@ export function initBatchView({ getSettings }) {
   $('#bNoThumb').checked = s0.filterNoThumb !== false;
   $('#bScroll').checked = true;
   $('#bLayout').value = s0.pdfLayout || 'continuous';
+  $('#bOrder').value = s0.orderMode === 'dom' ? 'dom' : 'screen';
 
   function readUrl() {
     params = findNumericParams($('#bUrl').value.trim());
@@ -246,9 +247,22 @@ export function initBatchView({ getSettings }) {
     const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: collectImages, args: [{}] });
     const entries = result.entries.filter((e) => !e.urlError).map((e) => ({ ...e, pageUrl: result.pageUrl }));
     const opts = { thumbMaxSide: settings.thumbMaxSide, maxVariants: 6, guessVariants: settings.guessVariants };
-    const resolved = await Promise.all(entries.map((e) => resolveEntry(e, probe, opts)));
+    let resolved = await Promise.all(entries.map((e) => resolveEntry(e, probe, opts)));
+    if ($('#bOrder').value !== 'dom') resolved = screenOrder(resolved);
     const { unique } = dedupeInOrder(resolved, (it) => urlKey(it.originalUrl));
-    return { title: result.title, pageUrl: result.pageUrl, found: unique.length, items: applyFilters(unique, filters).items };
+    let items = applyFilters(unique, filters).items;
+    let relaxed = '';
+    // Images on the page but none match: loosen the format/thumbnail conditions step by step.
+    if (!items.length && unique.length && $('#bRelax').checked) {
+      for (const step of relaxations(filters)) {
+        items = applyFilters(unique, step.filters).items;
+        if (items.length) {
+          relaxed = step.note;
+          break;
+        }
+      }
+    }
+    return { title: result.title, pageUrl: result.pageUrl, found: unique.length, items, relaxed };
   }
 
   function currentFilters() {
@@ -323,7 +337,12 @@ export function initBatchView({ getSettings }) {
       set(r, { step: 'analyzing' });
       const a = await analyze(tabId, ctx.probe, ctx.filters);
       set(r, { title: a.title, found: a.found, images: a.items.length });
-      if (!a.items.length) return set(r, { step: 'skipped', error: '조건에 맞는 이미지가 없습니다 (마지막 회차 이후이거나 로그인이 필요한 페이지일 수 있음)' });
+      if (!a.items.length) {
+        const why = a.found
+          ? `찾은 ${a.found}장 중 조건에 맞는 이미지가 없습니다${$('#bRelax').checked ? ' (썸네일·WEBP 조건을 풀어도 없음 — 최소 너비·높이를 확인하세요)' : ''}`
+          : '조건에 맞는 이미지가 없습니다 (마지막 회차 이후이거나 로그인이 필요한 페이지일 수 있음)';
+        return set(r, { step: 'skipped', error: why });
+      }
       set(r, { step: 'pdf' });
       const build = () =>
         createPdf(a.items.map((it, i) => ({ url: it.originalUrl, label: `${i + 1}번째` })), {
@@ -349,7 +368,8 @@ export function initBatchView({ getSettings }) {
       const file = `${buildFolder({ ...settings, folderMode: 'none', subFolder: $('#bFolder').value.trim() })}/${name}.pdf`;
       const saved = await savePdf(pdf.blob, file);
       const missing = pdf.skipped.length;
-      set(r, { step: 'done', file: saved, images: pdf.included, error: missing ? `${missing}장 제외: ${pdf.skipped[0].reason}` : '' });
+      const notes = [a.relaxed && `조건 완화: ${a.relaxed}`, missing && `${missing}장 제외: ${pdf.skipped[0].reason}`].filter(Boolean);
+      set(r, { step: 'done', file: saved, images: pdf.included, error: notes.join(' · ') });
     } catch (e) {
       set(r, { step: 'failed', error: String(e?.message || e) });
     } finally {

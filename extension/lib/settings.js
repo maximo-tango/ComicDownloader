@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = {
   filterMinWidth: 500, // px, 0 = no limit
   filterMinHeight: 400,
   scrollOnOpen: true, // first search scrolls the page to load lazy images
+  orderMode: 'screen', // 'screen' (top→bottom, left→right as shown) | 'dom' (HTML order)
   pdfLayout: 'continuous', // 'continuous' (images joined, no gaps) | 'page' (one image per page) | 'a4'
 };
 

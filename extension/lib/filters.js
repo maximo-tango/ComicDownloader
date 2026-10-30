@@ -62,3 +62,18 @@ export function formatBytes(n) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
+
+/**
+ * Looser versions of `filters` to try, in order, when a page has images but none
+ * match (연속 PDF): keep thumbnails, then also accept WEBP, then both. Size limits stay.
+ * @returns [{ filters, note }]
+ */
+export function relaxations(filters) {
+  const thumbs = filters.excludeThumbnails ? { excludeThumbnails: false } : null;
+  const webp = filters.formats && !filters.formats.includes('WEBP') ? { formats: [...filters.formats, 'WEBP'] } : null;
+  const steps = [];
+  if (thumbs) steps.push({ filters: { ...filters, ...thumbs }, note: '썸네일 의심 포함' });
+  if (webp) steps.push({ filters: { ...filters, ...webp }, note: 'WEBP 포함' });
+  if (thumbs && webp) steps.push({ filters: { ...filters, ...thumbs, ...webp }, note: '썸네일 의심 포함 · WEBP 포함' });
+  return steps;
+}

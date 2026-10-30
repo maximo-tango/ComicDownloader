@@ -26,6 +26,7 @@ form.addEventListener('change', async () => {
     conflictAction: f.conflictAction.value,
     concurrency: clamp(f.concurrency.value, 1, 8, 3),
     pdfLayout: f.pdfLayout.value,
+    orderMode: f.orderMode.value === 'dom' ? 'dom' : 'screen',
     previewSize: f.previewSize.value,
     thumbMaxSide: clamp(f.thumbMaxSide.value, 16, 4000, 300),
     scrollMaxScreens: clamp(f.scrollMaxScreens.value, 1, 200, 30),

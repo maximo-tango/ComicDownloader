@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dedupeInOrder, mergeOrder } from '../extension/lib/ordering.js';
+import { dedupeInOrder, mergeOrder, screenOrder } from '../extension/lib/ordering.js';
 import { applyFilters, DEFAULT_FILTERS } from '../extension/lib/filters.js';
 import { resolveEntry } from '../extension/lib/resolver.js';
 
@@ -65,4 +65,21 @@ test('A/B/C scenario: order follows the page, never size or file name', async ()
   assert.deepEqual(filtered.map((x) => x.id), ['A', 'C']);
   // Rescan with the same DOM: unchanged.
   assert.deepEqual(mergeOrder(order, ['A', 'B', 'C']), ['A', 'B', 'C']);
+});
+
+test('screenOrder: top to bottom, same row left to right, regardless of HTML order', () => {
+  const at = (id, top, left = 0, h = 100) => ({ id, pos: { top, left, h } });
+  // HTML order 3,1,4,2 but placed on screen as 1,2,3,4 (a shuffled strip)
+  const strip = [at(3, 200), at(1, 0), at(4, 300), at(2, 100)];
+  assert.deepEqual(screenOrder(strip).map((x) => x.id), [1, 2, 3, 4]);
+  // a row of three whose tops differ by a few pixels, then one below
+  const grid = [at('c', 3, 400), at('a', 0, 0), at('d', 120, 0), at('b', 1, 200)];
+  assert.deepEqual(screenOrder(grid).map((x) => x.id), ['a', 'b', 'c', 'd']);
+  // unpositioned items (hidden, iframe) stay right after the item before them in HTML order
+  const mixed = [at('x', 100), { id: 'hidden' }, at('y', 0), { id: 'frame' }];
+  assert.deepEqual(screenOrder(mixed).map((x) => x.id), ['y', 'frame', 'x', 'hidden']);
+  assert.deepEqual(screenOrder([{ id: 1 }, { id: 2 }]).map((x) => x.id), [1, 2], 'no positions: unchanged');
+  // already in order: unchanged (stable)
+  const tall = [at(1, 0, 0, 2000), at(2, 2000, 0, 2000), at(3, 4000, 0, 1500)];
+  assert.deepEqual(screenOrder(tall).map((x) => x.id), [1, 2, 3]);
 });
